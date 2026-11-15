@@ -67,6 +67,7 @@ class TicketSession:
     unit_price: Optional[str] = None
     quantity: Optional[int] = None
     customer_name: Optional[str] = None
+    profile_name: Optional[str] = None
     events: List[Dict[str, Any]] = field(default_factory=list)
     history: List[Dict[str, str]] = field(default_factory=list)
 
@@ -407,6 +408,21 @@ def _extract_quantity(text: str) -> Optional[int]:
     return None
 
 
+def _clean_customer_name(text: str) -> str:
+    cleaned = text.strip().strip("\"'").strip()
+    lowered = cleaned.lower()
+    prefixes = [
+        "a nombre de ", "a nombre ", "nombre de ", "para ",
+        "me llamo ", "mi nombre es ", "seria a nombre de ", "sería a nombre de ",
+        "seria ", "sería ", "ponle "
+    ]
+    for p in prefixes:
+        if lowered.startswith(p):
+            cleaned = cleaned[len(p):].strip()
+            lowered = cleaned.lower()
+    return cleaned.title() if cleaned.islower() else cleaned
+
+
 def maybe_handle_ticket(phone: str, text: str, profile_name: str = "", api: Optional[CoreApi] = None) -> Optional[ChatResponse]:
     cleaned = (text or "").strip()
     if not cleaned:
@@ -434,27 +450,28 @@ def maybe_handle_ticket(phone: str, text: str, profile_name: str = "", api: Opti
 
 def handle_ticket_message(phone: str, text: str, profile_name: str = "", api: Optional[CoreApi] = None) -> ChatResponse:
     client = api or CoreApi()
-    session = _SESSIONS.setdefault(phone, TicketSession(customer_name=profile_name or None))
-    if profile_name and not session.customer_name:
-        session.customer_name = profile_name
+    session = _SESSIONS.setdefault(phone, TicketSession(profile_name=profile_name or None))
+    if profile_name and not session.profile_name:
+        session.profile_name = profile_name
+    display_name = session.customer_name or session.profile_name
     try:
         lowered = text.lower().strip()
         if lowered in {"salir", "asesor", "humano"}:
             _SESSIONS.pop(phone, None)
-            name_part = f", {session.customer_name}" if session.customer_name else ""
+            name_part = f", {display_name}" if display_name else ""
             return _reply(
                 f"¡Listo{name_part}! Cerramos el asistente de boletos por ahora. 😊 Si necesitas hablar con alguien del equipo, escríbenos tu duda aquí abajo y con gusto te atendemos.",
                 "CODI-TICKETS-EXIT",
             )
         if any(p in lowered for p in ("ya no quiero nada", "no quiero nada", "cancelar", "olvidalo", "olvídalo", "mejor ya no")):
             _SESSIONS.pop(phone, None)
-            name_part = f", {session.customer_name}" if session.customer_name else ""
+            name_part = f", {display_name}" if display_name else ""
             return _reply(
                 f"¡No te preocupes{name_part}! Cancelamos el apartado por ahora. 😊 Cuando quieras volver a ver fechas o apartar entradas, solo escríbeme *boletos*.",
                 "CODI-TICKETS-EXIT",
             )
         if lowered in _THANKS:
-            name_part = f", {session.customer_name}" if session.customer_name else ""
+            name_part = f", {display_name}" if display_name else ""
             return _reply(
                 f"¡Con muchísimo gusto{name_part}! 😊✨ Cuando quieras ver más fechas o apartar otros boletos, solo escríbeme *boletos*. ¡Nos vemos pronto!",
                 "CODI-TICKETS-THANKS",
@@ -485,10 +502,19 @@ def handle_ticket_message(phone: str, text: str, profile_name: str = "", api: Op
             )
         if text == "codi:confirm:yes":
             return _charge(client, session, phone)
-        if session.step == "name" and not text.startswith("codi:"):
-            session.customer_name = text.strip()
-            session.step = "confirm"
-            return _confirmation_card(session, phone)
+        if session.step == "name" and not text.startswith("codi:") and "?" not in text and not _looks_like_question(lowered):
+            if lowered in {"yo", "a mi nombre", "a mi", "el mio", "el mío", "mi nombre"} and session.profile_name:
+                name = session.profile_name.strip()
+            else:
+                name = _clean_customer_name(text)
+            if len(name) >= 2:
+                session.customer_name = name
+                session.step = "confirm"
+                return _confirmation_card(session, phone)
+            return _reply(
+                "Por favor escribe un *nombre y apellido* válido para emitir tus accesos: 😊",
+                "CODI-TICKETS-NAME",
+            )
         if session.step == "confirm" and lowered in {
             "si", "sí", "confirmo", "confirmar", "si confirmo", "sí confirmo", "adelante", "va", "listo", "generar cobro"
         }:
@@ -507,7 +533,7 @@ def handle_ticket_message(phone: str, text: str, profile_name: str = "", api: Op
             qty = _extract_quantity(text)
             if qty is not None:
                 return _ask_confirmation(session, phone, qty)
-        if session.step in ("confirm", "paid", "quantity") and not text.startswith("codi:") and "?" not in text:
+        if session.step in ("confirm", "paid", "quantity", "name") and not text.startswith("codi:") and "?" not in text:
             if "nombre" in lowered or "titular" in lowered:
                 session.step = "name"
                 return _reply(
@@ -528,6 +554,11 @@ def handle_ticket_message(phone: str, text: str, profile_name: str = "", api: Op
                 return ff
             session.step = "dates"
             return _show_dates(client, session, text)
+        if session.step == "name":
+            return _reply(
+                "Por favor escribe el *nombre y apellido completo* para emitir tus accesos oficiales: 😊",
+                "CODI-TICKETS-NAME",
+            )
         if session.step == "quantity":
             return _reply(
                 "¿Me podrías decir con un número cuántas entradas te aparto? 😊 Por ejemplo, escribe *1*, *2* o *4*.",
@@ -585,8 +616,8 @@ def _show_dates(client: CoreApi, session: TicketSession, user_text: str = "bolet
         {"id": f"codi:date:{day}", "title": format_mexico_city_day(day)[:24], "description": f"Ver cartelera del {format_mexico_city_day(day)}"[:72]}
         for day in dates[:10]
     ]
-    customer_name = session.customer_name
-    greeting = f"¡Hola, *{customer_name}*! 👋" if customer_name else "¡Hola! 👋"
+    display_name = session.customer_name or session.profile_name
+    greeting = f"¡Hola, *{display_name}*! 👋" if display_name else "¡Hola! 👋"
     body = (
         f"{greeting} Qué gusto saludarte.\n\n"
         f"Con mucho gusto te ayudo a apartar tus entradas. 🎶✨ "
@@ -605,7 +636,7 @@ def _show_dates(client: CoreApi, session: TicketSession, user_text: str = "bolet
         (
             f"El usuario acaba de escribir: '{user_text}'. "
             f"Las FECHAS OFICIALES DISPONIBLES en el botón interactivo son exactamente: {dates_human}. "
-            f"Salúdalo por su nombre ({customer_name or 'amigo'}) con mucha calidez y naturalidad, "
+            f"Salúdalo por su nombre ({display_name or 'amigo'}) con mucha calidez y naturalidad, "
             f"confirma con entusiasmo la fecha si pidió alguna de las disponibles (como el día 15, 17 o 21), "
             f"NUNCA digas que hay un error en la fecha ni menciones el día 14, "
             f"e invítalo a elegir la fecha en el botón de abajo."
@@ -641,7 +672,8 @@ def _show_events(client: CoreApi, session: TicketSession, day: str) -> ChatRespo
             "description": f"📍 {event.get('venue') or 'CDMX'}"[:72],
         })
     session.step = "events"
-    name_part = f", *{session.customer_name}*" if session.customer_name else ""
+    display_name = session.customer_name or session.profile_name
+    name_part = f", *{display_name}*" if display_name else ""
     return _menu(
         (
             f"¡Súper bien{name_part}! 🙌 Para el *{format_mexico_city_day(day)}* tenemos estos eventos listos para ti.\n\n"
@@ -702,12 +734,13 @@ def _show_tickets(client: CoreApi, session: TicketSession, event_id: str, send_f
         f"Aquí abajo puedes elegir tu tipo de boleto para apartar tus lugares (o si tienes alguna duda del evento, pregúntame con confianza):"
     )
     rag_chunks = _build_event_rag_chunks(client, session)
+    display_name = session.customer_name or session.profile_name
     llm_res = _call_ticket_llm(
         f"Elegí el evento {session.event_name}",
         session,
         rag_chunks[:2],
         (
-            f"El cliente {session.customer_name or ''} acaba de elegir el evento '{session.event_name}' en '{venue}'. "
+            f"El cliente {display_name or ''} acaba de elegir el evento '{session.event_name}' en '{venue}'. "
             f"Ya le enviamos arriba la imagen del flyer. Haz un comentario breve, cálido y entusiasta de 2 frases "
             f"sobre este evento usando algún detalle real del contexto RAG (música, ambiente o sede) e invítalo a "
             f"tocar el botón 'Elegir boleto' de aquí abajo o preguntarte cualquier duda."
@@ -737,7 +770,9 @@ def _ask_quantity(session: TicketSession, ticket_id: str) -> ChatResponse:
     session.ticket_name = ticket.get("name")
     session.unit_price = str(ticket.get("currentPrice"))
     session.step = "quantity"
-    name_part = f", *{session.customer_name}*" if session.customer_name else ""
+    session.customer_name = None
+    display_name = session.customer_name or session.profile_name
+    name_part = f", *{display_name}*" if display_name else ""
     return _reply(
         (
             f"¡Perfecto{name_part}! 🎟️ El boleto *{session.ticket_name}* está en *`${session.unit_price} MXN`* por persona.\n\n"
@@ -761,8 +796,12 @@ def _ask_confirmation(session: TicketSession, phone: str, quantity: int) -> Chat
     session.quantity = quantity
     if not session.customer_name:
         session.step = "name"
+        qty_label = f"*{quantity}* boleto" if quantity == 1 else f"*{quantity}* boletos"
         return _reply(
-            "¡Súper! 🙌 ¿A nombre de quién registramos los boletos? Escríbeme tu *nombre y apellido* tal como quieres que aparezca en tu acceso:",
+            (
+                f"¡Súper! 🙌 Apartamos {qty_label} para *{session.event_name}*.\n\n"
+                f"¿A nombre de quién dejamos tus entradas? Escribe por favor tu *nombre y apellido completo* para tu acceso oficial en puerta:"
+            ),
             "CODI-TICKETS-NAME",
         )
     session.step = "confirm"
@@ -830,6 +869,8 @@ def _charge(client: CoreApi, session: TicketSession, phone: str) -> ChatResponse
 
 
 def _step_hint(session: TicketSession) -> str:
+    if session.step == "name":
+        return "\n\n👉 *Para seguir con tus boletos:* escribe tu *nombre y apellido completo* para el titular de la entrada."
     if session.step == "quantity" and session.ticket_name:
         return f"\n\n👉 *Para seguir con tu apartado de {session.ticket_name}:* escríbeme cuántas entradas quieres (por ejemplo: *1*, *2* o *4*)."
     if session.step == "confirm" and session.quantity and session.ticket_name:

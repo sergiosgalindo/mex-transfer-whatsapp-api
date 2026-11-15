@@ -68,7 +68,9 @@ def test_checkout_sends_a_decodable_codi_qr_and_the_payment_link():
     handle_ticket_message(phone, "codi:date:2026-11-15", "Ana López", client)
     handle_ticket_message(phone, "codi:event:evt-1", "Ana López", client)
     handle_ticket_message(phone, "codi:ticket:tt-1", "Ana López", client)
-    confirm = handle_ticket_message(phone, "2", "Ana López", client)
+    ask_name = handle_ticket_message(phone, "2", "Ana López", client)
+    assert "nombre y apellido" in ask_name.reply
+    confirm = handle_ticket_message(phone, "Ana López", "Ana López", client)
     assert "525512345678" in confirm.reply
     assert "Ana López" in confirm.reply
     charged = handle_ticket_message(phone, "codi:confirm:yes", "Ana López", client)
@@ -107,9 +109,12 @@ def test_user_can_correct_quantity_directly_from_confirmation_step():
     handle_ticket_message(phone, "codi:date:2026-11-15", "Segio", client)
     handle_ticket_message(phone, "codi:event:evt-1", "Segio", client)
     handle_ticket_message(phone, "codi:ticket:tt-1", "Segio", client)
-    first_confirm = handle_ticket_message(phone, "3", "Segio", client)
+    ask_name = handle_ticket_message(phone, "3", "Segio", client)
+    assert "nombre y apellido" in ask_name.reply
+    first_confirm = handle_ticket_message(phone, "Sergio Galindo", "Segio", client)
     assert "3 × General" in first_confirm.reply
     assert "$540.00 MXN" in first_confirm.reply
+    assert "Sergio Galindo" in first_confirm.reply
 
     updated_confirm = handle_ticket_message(phone, "No, mejor 4 boletos", "Segio", client)
     assert updated_confirm.active_use_case == "CODI-TICKETS-CONFIRM"
