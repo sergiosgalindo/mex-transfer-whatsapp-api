@@ -11,6 +11,7 @@ from app.controllers.chat_controller import router as chat_router
 from app.controllers.fintech_controller import router as fintech_router
 from app.controllers.whatsapp_controller import router as whatsapp_router
 from app.models.database import init_db
+from app.tickets.router import router as ticket_router
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "web")
 
@@ -45,6 +46,7 @@ app.add_middleware(
 app.include_router(chat_router)
 app.include_router(fintech_router)
 app.include_router(whatsapp_router)
+app.include_router(ticket_router)
 
 if os.path.isdir(WEB_DIR):
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")

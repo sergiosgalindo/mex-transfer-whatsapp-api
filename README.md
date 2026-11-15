@@ -1,4 +1,33 @@
-# Fintech Omnichannel Assistant (`servicios-financieros`)
+# mex-transfer-whatsapp-api
+
+WhatsApp bridge for the CoDi ticket checkout. This process is the only one that talks to Meta. `mex-transfer-api` owns orders and Pey. `mex-transfer-web` is the organizer UI.
+
+Buyer-facing copy stays in Spanish. A person types `boletos`, picks a date, an event, a ticket type, and a quantity, then confirms their name and phone. The bot sends the CoDi charge QR PNG and the payment link. After Pey confirms the payment, the core calls `POST /internal/send-ticket` and this service sends the cinema-style entry QR.
+
+The same service still runs the existing financial-services assistant (credit simulation, statements, RAG). A credit question does not enter the ticket flow unless the chat is already buying tickets or the text is `boletos` / a `codi:` reply.
+
+## Ticket checkout
+
+```bash
+pip install -r requirements-dev.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CODI_CORE_API_URL` | `http://localhost:8080` | `mex-transfer-api` base URL |
+| `INTERNAL_API_TOKEN` | empty | Sent as `X-Internal-Token` when the core requires it |
+| `WHATSAPP_ACCESS_TOKEN` | empty | Meta Cloud API token. Without it, sends are simulated |
+| `PHONE_NUMBER_ID` | empty | WhatsApp phone number id |
+| `WHATSAPP_VERIFY_TOKEN` | `verify-token-123` | Meta webhook verification |
+
+Meta webhook: `GET/POST /webhook`. Ticket delivery: `POST /internal/send-ticket`.
+
+```bash
+pytest tests/test_ticket_checkout.py
+```
+
+## Fintech Omnichannel Assistant
 
 Production-ready Financial Services Orchestrator built with **FastAPI (MVC)**, **SQLAlchemy 2.0 Relational Database**, **Meta WhatsApp Cloud API**, **Llama (`llama3.1:8b`)**, **Semantic RAG (`SentenceTransformer`)**, **Llama Stack Conversation Memory**, and **Two-Layer Defense in Depth (`Prompt Guard` + `Llama Guard`)**.
 

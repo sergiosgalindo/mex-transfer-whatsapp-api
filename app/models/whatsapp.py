@@ -79,6 +79,15 @@ def normalize_mexican_phone(phone: str) -> str:
     return normalize_phone_digits(phone)
 
 
+def _profile_name(payload: Dict[str, Any], sender_raw: str) -> str:
+    for entry in payload.get("entry") or []:
+        for change in entry.get("changes") or []:
+            for contact in (change.get("value") or {}).get("contacts") or []:
+                if str(contact.get("wa_id") or "") == str(sender_raw):
+                    return str((contact.get("profile") or {}).get("name") or "")
+    return str(payload.get("profile_name") or "")
+
+
 def is_duplicate_message(message_id: str) -> bool:
     if not message_id:
         return False
@@ -266,20 +275,35 @@ async def process_whatsapp_webhook_payload(payload: Dict[str, Any]) -> List[Dict
 
         async with lock:
             start_ts = time.perf_counter()
-            with SessionLocal() as db:
-                user = find_user_by_identifier(db, normalized_sender)
-                user_id = user.user_id if user else f"anon-{normalized_sender}"
-                session_id = f"wa-{normalized_sender}"
+            from app.tickets.delivery import deliver_image
+            from app.tickets.flow import maybe_handle_ticket
 
-                chat_res = assistant_service.answer(
-                    db=db,
-                    message=text,
-                    session_id=session_id,
-                    user_id=user_id,
-                )
+            profile_name = _profile_name(payload, sender_raw)
+            ticket_res = maybe_handle_ticket(normalized_sender, text, profile_name)
+            user_id = f"anon-{normalized_sender}"
+            if ticket_res is None:
+                with SessionLocal() as db:
+                    user = find_user_by_identifier(db, normalized_sender)
+                    user_id = user.user_id if user else user_id
+                    session_id = f"wa-{normalized_sender}"
+                    chat_res = assistant_service.answer(
+                        db=db,
+                        message=text,
+                        session_id=session_id,
+                        user_id=user_id,
+                    )
+            else:
+                chat_res = ticket_res
 
+            image_b64 = None
+            if chat_res.tool_output:
+                image_b64 = chat_res.tool_output.get("codi_qr_png_b64")
             interactive_delivery = None
-            if chat_res.interactive_menu:
+            if image_b64:
+                import base64
+
+                delivery = deliver_image(normalized_sender, base64.b64decode(image_b64), chat_res.reply)
+            elif chat_res.interactive_menu:
                 menu_payload = dict(chat_res.interactive_menu)
                 menu_payload["body"] = {"text": chat_res.reply[:1020]}
                 interactive_delivery = await send_whatsapp_interactive_list(

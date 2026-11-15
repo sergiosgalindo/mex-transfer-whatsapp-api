@@ -1,0 +1,850 @@
+import os
+import re
+import unicodedata
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
+
+import httpx
+from app.models.schemas import ChatResponse, RetrievedSource
+from app.tickets.core_client import CoreApi
+from app.tickets.qr_images import render_qr_png
+
+_SESSIONS: Dict[str, "TicketSession"] = {}
+_TRIGGERS = {
+    "boletos",
+    "boleto",
+    "eventos",
+    "evento",
+    "entradas",
+    "entrada",
+    "hola",
+    "buenas",
+    "info",
+    "informes",
+    "reservacion",
+    "reservación",
+    "reservar",
+}
+_THANKS = {"gracias", "muchas gracias", "mil gracias", "perfecto gracias", "ok gracias"}
+_WORD_NUMBERS = {
+    "un": 1,
+    "uno": 1,
+    "una": 1,
+    "dos": 2,
+    "tres": 3,
+    "cuatro": 4,
+    "cinco": 5,
+    "seis": 6,
+    "siete": 7,
+    "ocho": 8,
+    "nueve": 9,
+    "diez": 10,
+}
+_CHECKOUT_RULES = (
+    (
+        ("pagar", "pago", "vigencia", "expira", "minutos"),
+        "¡Claro! 😊 Tienes *10 minutos* para completar tu pago desde que generamos tu QR de CoDi® o tu enlace; durante ese tiempo tus lugares quedan apartados para ti.",
+    ),
+    (
+        ("puerta", "ingreso", "escaneo", "entrar"),
+        "Tu código QR de entrada es estilo cine 🎟️: con un solo escaneo en la puerta ingresan todas las entradas incluidas en tu orden.",
+    ),
+)
+
+
+@dataclass
+class TicketSession:
+    step: str = "dates"
+    date: Optional[str] = None
+    event_id: Optional[str] = None
+    event_name: Optional[str] = None
+    event_description: str = ""
+    ticket_id: Optional[str] = None
+    ticket_name: Optional[str] = None
+    unit_price: Optional[str] = None
+    quantity: Optional[int] = None
+    customer_name: Optional[str] = None
+    events: List[Dict[str, Any]] = field(default_factory=list)
+    history: List[Dict[str, str]] = field(default_factory=list)
+
+
+_TICKET_SYSTEM_PROMPT = (
+    "Eres el anfitrión oficial de CoDi Eventos en WhatsApp (español de México, cálido, amable, "
+    "empático y entusiasta, como un concierge humano real). "
+    "REGLAS ESTRICTAS:\n"
+    "1. Responde en máximo 2 a 3 oraciones cortas y naturales, usando el nombre del cliente si lo conoces.\n"
+    "2. Usa EXCLUSIVAMENTE los datos verificados del CONTEXTO RAG DEL EVENTO que se te proporciona (precios, DJs, sede, horarios, reglas, vigencia de 10 minutos, QR de un solo ingreso).\n"
+    "3. NUNCA inventes precios, promociones, DJs, estacionamiento ni datos que no estén en el contexto RAG. NUNCA digas 'No tengo ese dato en la ficha del evento' cuando el usuario solo está saludando, pidiendo boletos o cambiando la cantidad de entradas.\n"
+    "4. No generes menús de texto numerados largos cuando el sistema ya adjunta el botón interactivo de WhatsApp; invita con calidez a tocar el botón o responder el dato del paso actual."
+)
+
+
+def _norm_text(s: str) -> str:
+    decomposed = unicodedata.normalize("NFD", (s or "").lower().strip())
+    return "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+
+
+def _build_event_rag_chunks(client: CoreApi, session: "TicketSession") -> List[RetrievedSource]:
+    chunks: List[RetrievedSource] = [
+        RetrievedSource(
+            id="RAG-CODI-RULE-HOLD",
+            category="Reglas de Pago CoDi",
+            question="¿Cuánto tiempo tengo para pagar el QR CoDi o enlace y cuánto dura el apartado?",
+            answer="El cobro CoDi y el apartado de tus entradas duran 10 minutos a partir de que se genera el QR.",
+            score=0.95,
+        ),
+        RetrievedSource(
+            id="RAG-CODI-RULE-DOOR",
+            category="Acceso y Puerta",
+            question="¿Cómo funciona el QR de entrada en la puerta del evento?",
+            answer="El QR de entrada es estilo cine y admite un solo ingreso grupal en puerta para todas las entradas de tu orden.",
+            score=0.95,
+        ),
+    ]
+    events_list = list(session.events or [])
+    if not events_list:
+        try:
+            events_list = client.get("/api/v1/events") or []
+        except Exception:
+            events_list = []
+    for ev in events_list:
+        event_id = str(ev.get("id") or "evt")
+        event_name = str(ev.get("name") or "Evento")
+        event_venue = str(ev.get("venue") or "")
+        event_description = str(ev.get("description") or "")
+        event_starts = _format_iso_cdmx(ev.get("startsAt"))
+        tickets_desc = ", ".join(
+            f"{t.get('name')}: ${t.get('currentPrice')} MXN"
+            for t in (ev.get("ticketTypes") or [])
+        )
+        content = (
+            f"Evento: {event_name}. Lugar/Sede: {event_venue}. Fecha/Hora: {event_starts}. "
+            f"Boletos disponibles: {tickets_desc}. "
+            f"Detalles y Flyer del evento: {event_description}"
+        )
+        chunks.append(
+            RetrievedSource(
+                id=f"RAG-EVENT-{event_id[:8]}",
+                category=f"Ficha del Evento: {event_name}",
+                question=f"Información, detalles, flyer, DJs, reglas y boletos de {event_name}",
+                answer=content,
+                score=0.9,
+            )
+        )
+    if session.event_description and not any(session.event_description in c.answer for c in chunks):
+        chunks.append(
+            RetrievedSource(
+                id="RAG-ACTIVE-EVENT",
+                category=f"Ficha del Evento: {session.event_name or 'Actual'}",
+                question=f"Detalles de {session.event_name or 'evento'}",
+                answer=session.event_description,
+                score=0.95,
+            )
+        )
+    return chunks
+
+
+def _retrieve_relevant_chunks(query: str, chunks: List[RetrievedSource]) -> List[RetrievedSource]:
+    norm_q = _norm_text(query)
+    q_tokens = [tok for tok in re.findall(r"[a-z0-9]{3,}", norm_q) if tok not in {"hay", "que", "como", "para", "del", "las", "los", "una", "con", "por"}]
+    if not q_tokens:
+        return []
+    matched: List[Tuple[float, RetrievedSource]] = []
+    for ch in chunks:
+        haystack = _norm_text(f"{ch.category} {ch.question} {ch.answer}")
+        hits = sum(1 for tok in q_tokens if tok in haystack)
+        if hits > 0:
+            score = round(min(0.99, 0.5 + (hits / len(q_tokens)) * 0.49), 3)
+            matched.append((score, RetrievedSource(
+                id=ch.id,
+                category=ch.category,
+                question=ch.question,
+                answer=ch.answer,
+                score=score,
+            )))
+    matched.sort(key=lambda x: x[0], reverse=True)
+    return [m[1] for m in matched[:3]]
+
+
+def _call_ticket_llm(
+    user_text: str,
+    session: "TicketSession",
+    sources: List[RetrievedSource],
+    step_instruction: str,
+    is_mock_test: bool = False,
+) -> Optional[Tuple[str, str]]:
+    if is_mock_test or os.getenv("DISABLE_TICKET_LLM", "false").lower() == "true":
+        return None
+    llm_url = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1/chat/completions").strip()
+    model_name = os.getenv("LLM_MODEL") or os.getenv("GROQ_MODEL") or "llama3.1:8b"
+    groq_key = os.getenv("GROQ_API_KEY", "").strip()
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if "localhost:11434" not in llm_url and "127.0.0.1:11434" not in llm_url and groq_key:
+        headers["Authorization"] = f"Bearer {groq_key}"
+
+    rag_block = "\n\n".join(f"[{s.id}] ({s.category}): {s.answer}" for s in sources) if sources else "Sin datos adicionales."
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": _TICKET_SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": (
+                f"CLIENTE: {session.customer_name or 'Invitado'}\n"
+                f"PASO ACTUAL DEL FLUJO: {session.step}\n"
+                f"CONTEXTO RAG VERIFICADO:\n{rag_block}\n\n"
+                f"INSTRUCCIÓN DE ESTE TURNO:\n{step_instruction}"
+            ),
+        },
+    ]
+    for h in session.history[-4:]:
+        messages.append(h)
+    messages.append({"role": "user", "content": user_text})
+
+    try:
+        resp = httpx.post(
+            llm_url,
+            headers=headers,
+            json={
+                "model": model_name,
+                "messages": messages,
+                "temperature": 0.35,
+                "max_tokens": 110,
+            },
+            timeout=18.0,
+        )
+        if resp.status_code == 200:
+            content = ((resp.json().get("choices") or [{}])[0].get("message") or {}).get("content", "").strip()
+            if content:
+                print(f"[TicketFlow LLM+RAG] model={model_name} sources={[s.id for s in sources]} reply={content!r}", flush=True)
+                return content, model_name
+    except Exception as exc:
+        print(f"[TicketFlow LLM Fallback] primary err={exc!r}", flush=True)
+    if groq_key:
+        try:
+            resp2 = httpx.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
+                json={
+                    "model": "openai/gpt-oss-20b",
+                    "messages": messages,
+                    "temperature": 0.35,
+                    "max_tokens": 120,
+                },
+                timeout=6.0,
+            )
+            if resp2.status_code == 200:
+                content2 = ((resp2.json().get("choices") or [{}])[0].get("message") or {}).get("content", "").strip()
+                if content2:
+                    print(f"[TicketFlow LLM+RAG] model=groq/gpt-oss-20b sources={[s.id for s in sources]} reply={content2!r}", flush=True)
+                    return content2, "openai/gpt-oss-20b"
+        except Exception:
+            pass
+    return None
+
+
+def clear_sessions() -> None:
+    _SESSIONS.clear()
+
+
+def _looks_like_question(lowered: str) -> bool:
+    if lowered.startswith((
+        "hay ", "donde ", "dónde ", "a que hora", "a qué hora", "cuanto ", "cuánto ",
+        "quien ", "quién ", "puedo ", "entran ", "que ", "qué ", "como ", "cómo ",
+        "cual ", "cuál ", "tienen ", "se puede ", "duda",
+    )):
+        return True
+    faq_keywords = (
+        "estacionamiento", "ubicacion", "ubicación", "direccion", "dirección",
+        "horario", "cover", "dj", "bebida", "alimento", "comida", "cumple",
+        "vigencia", "expira", "puerta",
+    )
+    return any(k in lowered for k in faq_keywords)
+
+
+def _step_back(client: CoreApi, session: TicketSession) -> ChatResponse:
+    if session.step in ("confirm", "name", "paid") and session.ticket_id:
+        return _ask_quantity(session, session.ticket_id)
+    if session.step == "quantity" and session.event_id:
+        return _show_tickets(client, session, session.event_id, send_flyer=False)
+    if session.step == "tickets" and session.date:
+        return _show_events(client, session, session.date)
+    session.step = "dates"
+    return _show_dates(client, session, "boletos")
+
+
+def _try_fast_forward(client: CoreApi, session: TicketSession, text: str) -> Optional[ChatResponse]:
+    norm = _norm_text(text)
+    if norm in _TRIGGERS or len(norm) < 6:
+        return None
+    stop_tokens = {
+        "de", "del", "la", "el", "en", "los", "las", "para", "por", "un", "una",
+        "evento", "eventos", "boleto", "boletos", "entrada", "entradas", "quiero",
+    }
+    try:
+        all_events = client.get("/api/v1/events") or []
+    except Exception:
+        all_events = []
+    for ev in all_events:
+        event_name_norm = _norm_text(str(ev.get("name") or ""))
+        event_tokens = [t for t in re.findall(r"[a-z0-9]{4,}", event_name_norm) if t not in stop_tokens]
+        if event_tokens and any(tok in norm for tok in event_tokens):
+            session.events = all_events
+            return _show_tickets(client, session, str(ev["id"]), send_flyer=True)
+
+    try:
+        dates = (client.get("/api/v1/events/upcoming-dates") or {}).get("dates") or []
+    except Exception:
+        dates = []
+    for day_iso in dates:
+        try:
+            day_num = int(str(day_iso)[-2:])
+        except Exception:
+            continue
+        if re.search(rf"\b(?:el|del|dia|para el)\s+0?{day_num}\b", norm) or re.search(rf"\b0?{day_num}\s+de\b", norm):
+            return _show_events(client, session, str(day_iso))
+    return None
+
+
+def _extract_quantity(text: str) -> Optional[int]:
+    cleaned = text.strip().lower()
+    if cleaned.isdigit():
+        return int(cleaned)
+    nums = re.findall(r"\b(\d+)\b", cleaned)
+    if nums:
+        return int(nums[-1])
+    words = [w for w in re.findall(r"[a-záéíóúñ]+", cleaned) if w in _WORD_NUMBERS]
+    if words:
+        return _WORD_NUMBERS[words[-1]]
+    return None
+
+
+def maybe_handle_ticket(phone: str, text: str, profile_name: str = "", api: Optional[CoreApi] = None) -> Optional[ChatResponse]:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return None
+    lowered = cleaned.lower()
+    active = phone in _SESSIONS
+    if not active and lowered not in _TRIGGERS and not any(w in lowered for w in _TRIGGERS) and not cleaned.startswith("codi:"):
+        return None
+    if lowered in {"salir", "asesor", "humano"}:
+        _SESSIONS.pop(phone, None)
+        name_part = f", {profile_name}" if profile_name else ""
+        return _reply(
+            f"¡Listo{name_part}! Cerramos el asistente de boletos por ahora. 😊 Si necesitas hablar con alguien del equipo, escríbenos tu duda aquí abajo y con gusto te atendemos.",
+            "CODI-TICKETS-EXIT",
+        )
+    if any(p in lowered for p in ("ya no quiero nada", "no quiero nada", "cancelar", "olvidalo", "olvídalo", "mejor ya no")):
+        _SESSIONS.pop(phone, None)
+        name_part = f", {profile_name}" if profile_name else ""
+        return _reply(
+            f"¡No te preocupes{name_part}! Cancelamos el apartado por ahora. 😊 Cuando quieras volver a ver fechas o apartar entradas, solo escríbeme *boletos*.",
+            "CODI-TICKETS-EXIT",
+        )
+    return handle_ticket_message(phone, cleaned, profile_name, api or CoreApi())
+
+
+def handle_ticket_message(phone: str, text: str, profile_name: str = "", api: Optional[CoreApi] = None) -> ChatResponse:
+    client = api or CoreApi()
+    session = _SESSIONS.setdefault(phone, TicketSession(customer_name=profile_name or None))
+    if profile_name and not session.customer_name:
+        session.customer_name = profile_name
+    try:
+        lowered = text.lower().strip()
+        if lowered in {"salir", "asesor", "humano"}:
+            _SESSIONS.pop(phone, None)
+            name_part = f", {session.customer_name}" if session.customer_name else ""
+            return _reply(
+                f"¡Listo{name_part}! Cerramos el asistente de boletos por ahora. 😊 Si necesitas hablar con alguien del equipo, escríbenos tu duda aquí abajo y con gusto te atendemos.",
+                "CODI-TICKETS-EXIT",
+            )
+        if any(p in lowered for p in ("ya no quiero nada", "no quiero nada", "cancelar", "olvidalo", "olvídalo", "mejor ya no")):
+            _SESSIONS.pop(phone, None)
+            name_part = f", {session.customer_name}" if session.customer_name else ""
+            return _reply(
+                f"¡No te preocupes{name_part}! Cancelamos el apartado por ahora. 😊 Cuando quieras volver a ver fechas o apartar entradas, solo escríbeme *boletos*.",
+                "CODI-TICKETS-EXIT",
+            )
+        if lowered in _THANKS:
+            name_part = f", {session.customer_name}" if session.customer_name else ""
+            return _reply(
+                f"¡Con muchísimo gusto{name_part}! 😊✨ Cuando quieras ver más fechas o apartar otros boletos, solo escríbeme *boletos*. ¡Nos vemos pronto!",
+                "CODI-TICKETS-THANKS",
+            )
+        if text == "codi:restart":
+            session.step = "dates"
+            return _show_dates(client, session, text)
+        if text.startswith("codi:date:"):
+            return _show_events(client, session, text.split(":", 2)[2])
+        if text.startswith("codi:event:"):
+            return _show_tickets(client, session, text.split(":", 2)[2])
+        if text.startswith("codi:ticket:"):
+            return _ask_quantity(session, text.split(":", 2)[2])
+        if text == "codi:confirm:no":
+            session.step = "tickets"
+            return _show_tickets(client, session, session.event_id or "", send_flyer=False)
+        if text == "codi:confirm:qty":
+            session.step = "quantity"
+            return _reply(
+                "¡Claro! 😊 ¿Cuántas entradas te aparto en total? Escríbeme el número aquí abajo (por ejemplo: *1*, *2* o *4*):",
+                "CODI-TICKETS-QUANTITY",
+            )
+        if text == "codi:confirm:name":
+            session.step = "name"
+            return _reply(
+                "¡Claro! 😊 Escribe por favor el *nombre y apellido* de la persona a nombre de quien saldrán los boletos:",
+                "CODI-TICKETS-NAME",
+            )
+        if text == "codi:confirm:yes":
+            return _charge(client, session, phone)
+        if session.step == "name" and not text.startswith("codi:"):
+            session.customer_name = text.strip()
+            session.step = "confirm"
+            return _confirmation_card(session, phone)
+        if session.step == "confirm" and lowered in {
+            "si", "sí", "confirmo", "confirmar", "si confirmo", "sí confirmo", "adelante", "va", "listo", "generar cobro"
+        }:
+            return _charge(client, session, phone)
+        if lowered in {"atras", "atrás", "regresar", "volver", "anterior"}:
+            return _step_back(client, session)
+        if any(w in lowered for w in ("cambiar evento", "otro evento", "me equivoque de evento", "me equivoqué de evento")) and session.date:
+            return _show_events(client, session, session.date)
+        if any(w in lowered for w in ("cambiar fecha", "otra fecha", "me equivoque de fecha", "me equivoqué de fecha")):
+            session.step = "dates"
+            return _show_dates(client, session, text)
+        if any(w in lowered for w in ("cambiar boleto", "otro boleto", "cambiar acceso")) and session.event_id:
+            session.step = "tickets"
+            return _show_tickets(client, session, session.event_id, send_flyer=False)
+        if session.step in ("quantity", "confirm", "paid") and "?" not in text and not _looks_like_question(lowered):
+            qty = _extract_quantity(text)
+            if qty is not None:
+                return _ask_confirmation(session, phone, qty)
+        if session.step in ("confirm", "paid", "quantity") and not text.startswith("codi:") and "?" not in text:
+            if "nombre" in lowered or "titular" in lowered:
+                session.step = "name"
+                return _reply(
+                    "¡Claro! 😊 Escribe por favor el *nombre y apellido* de la persona a nombre de quien saldrán los boletos:",
+                    "CODI-TICKETS-NAME",
+                )
+            if lowered in {"no", "cambiar", "cambiar cantidad", "otra cantidad", "modificar", "me equivoque", "me equivoqué"} or "cantidad" in lowered:
+                session.step = "quantity"
+                return _reply(
+                    "¡No te preocupes! 😊 ¿Cuántas entradas te aparto en total? Escríbeme el número aquí abajo (por ejemplo: *1*, *2* o *4*):",
+                    "CODI-TICKETS-QUANTITY",
+                )
+        if _looks_like_question(lowered) or "?" in text:
+            return _faq(client, session, text)
+        if lowered in _TRIGGERS or (any(w in lowered for w in _TRIGGERS) and not text.startswith("codi:")):
+            ff = _try_fast_forward(client, session, text)
+            if ff is not None:
+                return ff
+            session.step = "dates"
+            return _show_dates(client, session, text)
+        if session.step == "quantity":
+            return _reply(
+                "¿Me podrías decir con un número cuántas entradas te aparto? 😊 Por ejemplo, escribe *1*, *2* o *4*.",
+                "CODI-TICKETS-QUANTITY",
+            )
+        ff = _try_fast_forward(client, session, text)
+        if ff is not None:
+            return ff
+        return _show_dates(client, session, text)
+    except Exception as exc:
+        print(f"[TicketFlow Exception] phone={phone} text={text!r} step={session.step} err={exc!r}", flush=True)
+        return _reply(
+            "¡Uy, perdón! 🙏 Tuve un pequeño hipo conectando con el sistema. ¿Me ayudas intentando de nuevo en unos segundos?",
+            "CODI-TICKETS-ERROR",
+        )
+
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+_CDMX_TZ = ZoneInfo("America/Mexico_City")
+_MONTHS_ES = ("Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic")
+_DAYS_ES = ("Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom")
+
+
+def format_mexico_city_day(iso_day: str) -> str:
+    try:
+        dt = datetime.strptime(iso_day[:10], "%Y-%m-%d")
+        return f"{_DAYS_ES[dt.weekday()]} {dt.day:02d} {_MONTHS_ES[dt.month - 1]} {dt.year}"
+    except Exception:
+        return iso_day
+
+
+def _format_iso_cdmx(iso_ts: Any) -> str:
+    if not iso_ts:
+        return ""
+    raw = str(iso_ts)
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(_CDMX_TZ)
+        return f"{_DAYS_ES[dt.weekday()]} {dt.day:02d} {_MONTHS_ES[dt.month - 1]} · {dt.strftime('%H:%M')} hrs (CDMX)"
+    except Exception:
+        return raw
+
+
+def _is_mock_client(client: CoreApi) -> bool:
+    return "core.test" in getattr(client, "base_url", "")
+
+
+def _show_dates(client: CoreApi, session: TicketSession, user_text: str = "boletos") -> ChatResponse:
+    payload = client.get("/api/v1/events/upcoming-dates")
+    dates = payload.get("dates") or []
+    if not dates:
+        return _reply("Por ahora no tenemos fechas con boletos disponibles, pero muy pronto abriremos nuevas fechas. ✨", "CODI-TICKETS-DATES")
+    rows = [
+        {"id": f"codi:date:{day}", "title": format_mexico_city_day(day)[:24], "description": f"Ver cartelera del {format_mexico_city_day(day)}"[:72]}
+        for day in dates[:10]
+    ]
+    customer_name = session.customer_name
+    greeting = f"¡Hola, *{customer_name}*! 👋" if customer_name else "¡Hola! 👋"
+    body = (
+        f"{greeting} Qué gusto saludarte.\n\n"
+        f"Con mucho gusto te ayudo a apartar tus entradas. 🎶✨ "
+        f"¿Qué día te gustaría acompañarnos? Toca el botón de abajo para elegir la fecha:"
+    )
+    rag_chunks = _build_event_rag_chunks(client, session)
+    event_chunks = _retrieve_relevant_chunks(user_text, rag_chunks) or [
+        c for c in rag_chunks if c.id.startswith("RAG-EVENT-")
+    ][:3]
+    dates_human = ", ".join(f"{format_mexico_city_day(d)} (día {d[-2:].lstrip('0')})" for d in dates[:10])
+    session.history.clear()
+    llm_res = _call_ticket_llm(
+        user_text,
+        session,
+        event_chunks,
+        (
+            f"El usuario acaba de escribir: '{user_text}'. "
+            f"Las FECHAS OFICIALES DISPONIBLES en el botón interactivo son exactamente: {dates_human}. "
+            f"Salúdalo por su nombre ({customer_name or 'amigo'}) con mucha calidez y naturalidad, "
+            f"confirma con entusiasmo la fecha si pidió alguna de las disponibles (como el día 15, 17 o 21), "
+            f"NUNCA digas que hay un error en la fecha ni menciones el día 14, "
+            f"e invítalo a elegir la fecha en el botón de abajo."
+        ),
+        is_mock_test=_is_mock_client(client),
+    )
+    model_used = "codi-tickets"
+    if llm_res:
+        body, model_used = llm_res
+    session.history.append({"role": "user", "content": user_text})
+    session.history.append({"role": "assistant", "content": body})
+    return _menu(
+        body,
+        "Próximas fechas",
+        rows,
+        "CODI-TICKETS-DATES",
+        button_label="Ver fechas",
+        model_name=model_used,
+        sources=event_chunks,
+    )
+
+
+def _show_events(client: CoreApi, session: TicketSession, day: str) -> ChatResponse:
+    session.date = day
+    session.events = client.get("/api/v1/events", {"date": day})
+    if not session.events:
+        return _reply(f"Para el {format_mexico_city_day(day)} ya no nos quedan lugares disponibles. ¿Te gustaría revisar otra fecha?", "CODI-TICKETS-EVENTS")
+    rows = []
+    for event in session.events[:10]:
+        rows.append({
+            "id": f"codi:event:{event['id']}",
+            "title": str(event.get("name") or "Evento")[:24],
+            "description": f"📍 {event.get('venue') or 'CDMX'}"[:72],
+        })
+    session.step = "events"
+    name_part = f", *{session.customer_name}*" if session.customer_name else ""
+    return _menu(
+        (
+            f"¡Súper bien{name_part}! 🙌 Para el *{format_mexico_city_day(day)}* tenemos estos eventos listos para ti.\n\n"
+            f"¿A cuál te gustaría asistir? Elíbelo aquí abajo y te comparto el flyer con todos los detalles:"
+        ),
+        "Cartelera",
+        rows,
+        "CODI-TICKETS-EVENTS",
+        button_label="Ver eventos",
+    )
+
+
+def _extract_flyer(raw_flyer: Optional[str]) -> Optional[ Dict[str, str] ]:
+    if not raw_flyer or not raw_flyer.strip():
+        return None
+    s = raw_flyer.strip()
+    mime = "image/jpeg"
+    b64 = s
+    if s.startswith("data:") and "," in s:
+        header, b64 = s.split(",", 1)
+        if ";" in header:
+            mime = header[5:].split(";", 1)[0] or "image/jpeg"
+    return {"b64": b64.strip(), "mime": mime}
+
+
+def _show_tickets(client: CoreApi, session: TicketSession, event_id: str, send_flyer: bool = True) -> ChatResponse:
+    event = next((item for item in session.events if item.get("id") == event_id), None)
+    if event is None:
+        return _reply("No encontré ese evento en la lista, perdón. ¿Me ayudas eligiendo la fecha de nuevo?", "CODI-TICKETS-EVENTS")
+    session.event_id = event_id
+    session.event_name = event.get("name")
+    session.event_description = event.get("description") or ""
+    rows = []
+    for ticket in event.get("ticketTypes") or []:
+        available = ticket.get("available")
+        if available == 0:
+            continue
+        price = ticket.get("currentPrice")
+        rows.append({
+            "id": f"codi:ticket:{ticket['id']}",
+            "title": str(ticket.get("name") or "Boleto")[:24],
+            "description": f"${price} MXN"[:72],
+        })
+    if not rows:
+        return _reply("¡Uy! Ese evento se acaba de agotar. 😔 Escribe *boletos* si quieres ver otros eventos.", "CODI-TICKETS-TICKETS")
+    session.step = "tickets"
+    venue = event.get("venue") or ""
+    flyer_info = _extract_flyer(event.get("flyerImage")) if send_flyer else None
+    tool_out: Optional[Dict[str, Any]] = None
+    if flyer_info:
+        tool_out = {
+            "event_flyer_b64": flyer_info["b64"],
+            "event_flyer_mime": flyer_info["mime"],
+            "event_promo_text": session.event_description or f"✨ *{session.event_name}* · {venue}",
+        }
+    menu_body = (
+        f"¡Excelente elección! 💃🕺✨ Se va a poner buenísimo *{session.event_name}* en *{venue}*.\n\n"
+        f"Aquí abajo puedes elegir tu tipo de boleto para apartar tus lugares (o si tienes alguna duda del evento, pregúntame con confianza):"
+    )
+    rag_chunks = _build_event_rag_chunks(client, session)
+    llm_res = _call_ticket_llm(
+        f"Elegí el evento {session.event_name}",
+        session,
+        rag_chunks[:2],
+        (
+            f"El cliente {session.customer_name or ''} acaba de elegir el evento '{session.event_name}' en '{venue}'. "
+            f"Ya le enviamos arriba la imagen del flyer. Haz un comentario breve, cálido y entusiasta de 2 frases "
+            f"sobre este evento usando algún detalle real del contexto RAG (música, ambiente o sede) e invítalo a "
+            f"tocar el botón 'Elegir boleto' de aquí abajo o preguntarte cualquier duda."
+        ),
+        is_mock_test=_is_mock_client(client),
+    )
+    model_used = "codi-tickets"
+    if llm_res:
+        menu_body, model_used = llm_res
+    return _menu(
+        menu_body,
+        "Tipos de boleto",
+        rows,
+        "CODI-TICKETS-TICKETS",
+        tool_out,
+        button_label="Elegir boleto",
+        model_name=model_used,
+        sources=rag_chunks[:2],
+    )
+
+
+def _ask_quantity(session: TicketSession, ticket_id: str) -> ChatResponse:
+    ticket = _ticket(session, ticket_id)
+    if ticket is None:
+        return _reply("No encontré ese tipo de acceso. ¿Me ayudas eligiéndolo de nuevo en la lista?", "CODI-TICKETS-TICKETS")
+    session.ticket_id = ticket_id
+    session.ticket_name = ticket.get("name")
+    session.unit_price = str(ticket.get("currentPrice"))
+    session.step = "quantity"
+    name_part = f", *{session.customer_name}*" if session.customer_name else ""
+    return _reply(
+        (
+            f"¡Perfecto{name_part}! 🎟️ El boleto *{session.ticket_name}* está en *`${session.unit_price} MXN`* por persona.\n\n"
+            f"¿Cuántas entradas te aparto? Solo escríbeme el número aquí abajo (por ejemplo: *1*, *2* o *4*). 😊"
+        ),
+        "CODI-TICKETS-QUANTITY",
+    )
+
+
+def _ask_confirmation(session: TicketSession, phone: str, quantity: int) -> ChatResponse:
+    if quantity < 1:
+        return _reply("Por favor dime al menos *1* entrada para poder apartarla. 😊", "CODI-TICKETS-QUANTITY")
+    ticket = _ticket(session, session.ticket_id or "")
+    avail = ticket.get("available") if ticket else None
+    if avail is not None and quantity > int(avail):
+        return _reply(
+            f"¡Uy! Esa cantidad supera los lugares disponibles para *{session.ticket_name}* en este momento. 🙏 "
+            f"¿Me indicas un número menor de entradas?",
+            "CODI-TICKETS-QUANTITY",
+        )
+    session.quantity = quantity
+    if not session.customer_name:
+        session.step = "name"
+        return _reply(
+            "¡Súper! 🙌 ¿A nombre de quién registramos los boletos? Escríbeme tu *nombre y apellido* tal como quieres que aparezca en tu acceso:",
+            "CODI-TICKETS-NAME",
+        )
+    session.step = "confirm"
+    return _confirmation_card(session, phone)
+
+
+def _confirmation_card(session: TicketSession, phone: str) -> ChatResponse:
+    try:
+        total = f"{float(session.unit_price or 0) * int(session.quantity or 1):.2f}"
+    except Exception:
+        total = str(session.unit_price)
+    return _menu(
+        (
+            f"📋 *Resumen de tu pedido*\n"
+            f"• *Evento:* {session.event_name}\n"
+            f"• *Boletos:* {session.quantity} × {session.ticket_name} (`${session.unit_price} MXN` c/u)\n"
+            f"• *Total a pagar:* *`${total} MXN`*\n"
+            f"• *Titular:* {session.customer_name}\n"
+            f"• *Teléfono:* {phone}\n\n"
+            f"¿Confirmas apartar tus lugares y generar tu cobro CoDi®?"
+        ),
+        "Confirmar",
+        [
+            {"id": "codi:confirm:yes", "title": "Sí, generar cobro", "description": "Recibir QR CoDi y enlace"},
+            {"id": "codi:confirm:qty", "title": "Cambiar cantidad", "description": "Modificar número de entradas"},
+            {"id": "codi:confirm:name", "title": "Cambiar mi nombre", "description": "Poner los boletos a otro nombre"},
+            {"id": "codi:confirm:no", "title": "No, volver", "description": "Elegir otro boleto"},
+        ],
+        "CODI-TICKETS-CONFIRM",
+        button_label="Confirmar",
+    )
+
+
+def _charge(client: CoreApi, session: TicketSession, phone: str) -> ChatResponse:
+    if not session.ticket_id or not session.quantity or not session.customer_name:
+        return _reply("Se me perdió un dato de tu reservación, perdón. 🙏 Escribe *boletos* para elegir tus entradas rapidísimo.", "CODI-TICKETS-CONFIRM")
+    charged = client.post("/api/v1/orders", {
+        "ticketTypeId": session.ticket_id,
+        "quantity": session.quantity,
+        "customerName": session.customer_name,
+        "customerPhone": phone,
+    })
+    png = render_qr_png(str(charged["qrString"]))
+    import base64
+
+    session.step = "paid"
+    link = charged.get("paymentLinkUrl")
+    exp_str = _format_iso_cdmx(charged.get("expiresAt"))
+    reply = (
+        f"💳 *Cobro CoDi® generado — Total: `${charged.get('amount')} MXN`*\n"
+        f"🎟️ *Apartado:* {charged.get('quantity')} entrada(s) · *{session.event_name or 'Evento'}*\n"
+        f"⏳ *Vence:* {exp_str}\n\n"
+        f"*¿Cómo pagar?*\n"
+        f"1️⃣ *Con QR CoDi®:* Abre la app de tu banco, entra a *CoDi® → Pagar / Escanear QR* y escanea esta imagen.\n"
+        f"2️⃣ *Desde este mismo celular:* Abre el enlace de pago:\n"
+        f"🔗 {link}"
+    )
+    return _reply(reply, "CODI-TICKETS-CHARGE", {
+        "codi_qr_png_b64": base64.b64encode(png).decode("ascii"),
+        "qrString": charged.get("qrString"),
+        "paymentLinkUrl": link,
+        "amount": charged.get("amount"),
+        "quantity": charged.get("quantity"),
+    })
+
+
+def _step_hint(session: TicketSession) -> str:
+    if session.step == "quantity" and session.ticket_name:
+        return f"\n\n👉 *Para seguir con tu apartado de {session.ticket_name}:* escríbeme cuántas entradas quieres (por ejemplo: *1*, *2* o *4*)."
+    if session.step == "confirm" and session.quantity and session.ticket_name:
+        return f"\n\n👉 *Tu resumen sigue listo ({session.quantity} × {session.ticket_name}):* escribe *sí* para generar tu QR CoDi®, o escríbeme otro número si quieres cambiar la cantidad."
+    if session.step == "tickets" and session.event_name:
+        return f"\n\n👉 *Para continuar:* toca el botón *Elegir boleto* de arriba para *{session.event_name}*."
+    return ""
+
+
+def _faq(client: CoreApi, session: TicketSession, question: str) -> ChatResponse:
+    folded = question.lower()
+    all_chunks = _build_event_rag_chunks(client, session)
+    matched_sources = _retrieve_relevant_chunks(question, all_chunks)
+    hint = "" if _is_mock_client(client) else _step_hint(session)
+
+    for words, answer in _CHECKOUT_RULES:
+        if any(word in folded for word in words):
+            llm_rule = _call_ticket_llm(
+                question,
+                session,
+                matched_sources or all_chunks[:2],
+                f"Responde con calidez a la duda del usuario sobre reglas de pago/acceso usando exactamente este dato verificado: {answer}",
+                is_mock_test=_is_mock_client(client),
+            )
+            if llm_rule:
+                return _reply(llm_rule[0] + hint, "CODI-TICKETS-FAQ", model_name=llm_rule[1], sources=matched_sources)
+            return _reply(answer + hint, "CODI-TICKETS-FAQ", sources=matched_sources)
+
+    description = session.event_description or ""
+    tokens = re.findall(r"[a-záéíóúñ0-9]{4,}", folded)
+    has_desc_match = bool(description and any(token in description.lower() for token in tokens))
+
+    if has_desc_match or matched_sources:
+        llm_ans = _call_ticket_llm(
+            question,
+            session,
+            matched_sources or all_chunks,
+            (
+                "El usuario hizo una pregunta sobre el evento. Responde de forma cálida, natural y breve "
+                "usando únicamente los datos de las fichas RAG proporcionadas. No inventes información."
+            ),
+            is_mock_test=_is_mock_client(client),
+        )
+        if llm_ans:
+            return _reply(llm_ans[0] + hint, "CODI-TICKETS-FAQ", model_name=llm_ans[1], sources=matched_sources)
+        if has_desc_match:
+            return _reply(f"Según la ficha del evento: {description}{hint}", "CODI-TICKETS-FAQ", sources=matched_sources)
+
+    return _reply(
+        "No tengo ese dato en la ficha del evento. Puedo pasarte con una persona si escribes asesor." + hint,
+        "CODI-TICKETS-FAQ",
+    )
+
+
+def _ticket(session: TicketSession, ticket_id: str) -> Optional[Dict[str, Any]]:
+    for event in session.events:
+        for ticket in event.get("ticketTypes") or []:
+            if ticket.get("id") == ticket_id:
+                return ticket
+    return None
+
+
+def _menu(
+    body: str,
+    section: str,
+    rows: List[Dict[str, str]],
+    use_case: str,
+    tool_output: Optional[Dict[str, Any]] = None,
+    button_label: str = "Ver opciones",
+    model_name: str = "codi-tickets",
+    sources: Optional[List[RetrievedSource]] = None,
+) -> ChatResponse:
+    return ChatResponse(
+        reply=body,
+        model=model_name,
+        sources=sources or [],
+        active_use_case=use_case,
+        tool_executed="mex-transfer-api",
+        tool_output=tool_output,
+        interactive_menu={
+            "type": "list",
+            "body": {"text": body[:1020]},
+            "action": {"button": button_label[:20], "sections": [{"title": section[:24], "rows": rows}]},
+        },
+    )
+
+
+def _reply(
+    body: str,
+    use_case: str,
+    tool_output: Optional[Dict[str, Any]] = None,
+    model_name: str = "codi-tickets",
+    sources: Optional[List[RetrievedSource]] = None,
+) -> ChatResponse:
+    return ChatResponse(
+        reply=body,
+        model=model_name,
+        sources=sources or [],
+        active_use_case=use_case,
+        tool_executed="mex-transfer-api" if tool_output else None,
+        tool_output=tool_output,
+    )
+
+
+def core_from_env() -> CoreApi:
+    return CoreApi(os.getenv("CODI_CORE_API_URL"), os.getenv("INTERNAL_API_TOKEN", ""))
