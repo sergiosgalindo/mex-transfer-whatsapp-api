@@ -465,7 +465,8 @@ def _looks_like_question(lowered: str) -> bool:
         "cover", "dj", "djs", "vigencia", "expira", "puerta", "acceso",
         "spei", "transferir", "transferencia", "clabe", "deposito", "depósito",
     )
-    return any(k in lowered for k in faq_keywords)
+    pattern = r"\b(" + "|".join(re.escape(k) for k in faq_keywords) + r")\b"
+    return bool(re.search(pattern, lowered))
 
 
 def _is_conversational_follow_up(lowered: str, session: TicketSession) -> bool:
@@ -553,16 +554,18 @@ def _extract_quantity(text: str) -> Optional[int]:
 
 
 def _clean_customer_name(text: str) -> str:
-    cleaned = text.strip().strip("\"'").strip()
+    cleaned = text.strip().strip("\"'").strip().rstrip(".")
     lowered = cleaned.lower()
     prefixes = [
+        "dejalo a nombre de ", "déjalo a nombre de ", "ponlo a nombre de ",
         "a nombre de ", "a nombre ", "nombre de ", "para ",
         "me llamo ", "mi nombre es ", "seria a nombre de ", "sería a nombre de ",
-        "seria ", "sería ", "ponle "
+        "seria para ", "sería para ", "seria ", "sería ", "ponle ",
+        "nombre: ", "titular: ", "a mi nombre ",
     ]
     for p in prefixes:
         if lowered.startswith(p):
-            cleaned = cleaned[len(p):].strip()
+            cleaned = cleaned[len(p):].strip().rstrip(".")
             lowered = cleaned.lower()
     return cleaned.title() if cleaned.islower() else cleaned
 
@@ -646,19 +649,20 @@ def handle_ticket_message(phone: str, text: str, profile_name: str = "", api: Op
             )
         if text == "codi:confirm:yes":
             return _charge(client, session, phone)
-        if session.step == "name" and not text.startswith("codi:") and "?" not in text and not _looks_like_question(lowered):
-            if lowered in {"yo", "a mi nombre", "a mi", "el mio", "el mío", "mi nombre"} and session.profile_name:
-                name = session.profile_name.strip()
-            else:
-                name = _clean_customer_name(text)
-            if len(name) >= 2:
-                session.customer_name = name
-                session.step = "confirm"
-                return _confirmation_card(session, phone)
-            return _reply(
-                "Por favor escribe un *nombre y apellido* válido para emitir tus accesos: 😊",
-                "CODI-TICKETS-NAME",
-            )
+        if session.step == "name" and not text.startswith("codi:") and "?" not in text:
+            if not _looks_like_question(lowered):
+                if lowered in {"yo", "a mi nombre", "a mi", "el mio", "el mío", "mi nombre"} and session.profile_name:
+                    name = session.profile_name.strip()
+                else:
+                    name = _clean_customer_name(text)
+                if len(name) >= 2:
+                    session.customer_name = name
+                    session.step = "confirm"
+                    return _confirmation_card(session, phone)
+                return _reply(
+                    "Por favor escribe un *nombre y apellido* válido para emitir tus accesos: 😊",
+                    "CODI-TICKETS-NAME",
+                )
         if session.step == "confirm" and lowered in {
             "si", "sí", "confirmo", "confirmar", "si confirmo", "sí confirmo", "adelante", "va", "listo", "generar cobro"
         }:
@@ -677,8 +681,8 @@ def handle_ticket_message(phone: str, text: str, profile_name: str = "", api: Op
             qty = _extract_quantity(text)
             if qty is not None:
                 return _ask_confirmation(session, phone, qty)
-        if session.step in ("confirm", "paid", "quantity", "name") and not text.startswith("codi:") and "?" not in text:
-            if "nombre" in lowered or "titular" in lowered:
+        if session.step in ("confirm", "paid", "quantity") and not text.startswith("codi:") and "?" not in text:
+            if any(w in lowered for w in ("cambiar nombre", "otro nombre", "cambiar titular", "otro titular")) or ("nombre" in lowered and session.step == "confirm"):
                 session.step = "name"
                 return _reply(
                     "¡Claro! 😊 Escribe por favor el *nombre y apellido* de la persona a nombre de quien saldrán los boletos:",

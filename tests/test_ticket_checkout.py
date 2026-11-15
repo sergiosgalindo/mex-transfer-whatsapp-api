@@ -188,3 +188,30 @@ def test_affirmative_follow_up_answers_faq_instead_of_resetting_dates():
     # Must NOT reset to date picker menu
     assert res2.active_use_case == "CODI-TICKETS-FAQ"
     assert res2.interactive_menu is None
+
+
+def test_customer_name_with_prefix_and_substring_keywords():
+    client = _client()
+    phone = "525512345678"
+
+    # Test 1: "A nombre de Josefina"
+    clear_sessions()
+    handle_ticket_message(phone, "boletos", "Sergio", client)
+    handle_ticket_message(phone, "codi:date:2026-11-15", "Sergio", client)
+    handle_ticket_message(phone, "codi:event:evt-1", "Sergio", client)
+    handle_ticket_message(phone, "codi:ticket:tt-1", "Sergio", client)
+    handle_ticket_message(phone, "3", "Sergio", client)
+    confirm = handle_ticket_message(phone, "A nombre de Josefina", "Sergio", client)
+    assert confirm.active_use_case == "CODI-TICKETS-CONFIRM"
+    assert "Josefina" in confirm.reply
+
+    # Test 2: "Josefina Martínez"
+    clear_sessions()
+    handle_ticket_message(phone, "boletos", "Sergio", client)
+    handle_ticket_message(phone, "codi:date:2026-11-15", "Sergio", client)
+    handle_ticket_message(phone, "codi:event:evt-1", "Sergio", client)
+    handle_ticket_message(phone, "codi:ticket:tt-1", "Sergio", client)
+    handle_ticket_message(phone, "3", "Sergio", client)
+    confirm2 = handle_ticket_message(phone, "Josefina Martínez", "Sergio", client)
+    assert confirm2.active_use_case == "CODI-TICKETS-CONFIRM"
+    assert "Josefina Martínez" in confirm2.reply
