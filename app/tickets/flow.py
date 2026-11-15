@@ -145,8 +145,7 @@ _TICKET_SYSTEM_PROMPT = (
     "# INSTRUCCIONES DE INTERACCIÓN\n"
     "1. Saludo cálido: Inicia siempre con calidez y entusiasmo, usando el nombre del cliente si lo conoces y poniéndote a su disposición.\n"
     "2. Claridad y empatía: Si el usuario tiene dudas o inquietudes sobre el evento o el pago CoDi®, responde con paciencia, tranquilidad y sin tecnicismos complejos; explica todo de manera sencilla y transparente.\n"
-    "3. Guía paso a paso concisa: No abrumes con muros de texto. Responde en 2 a 3 oraciones breves, naturales y bien estructuradas. "
-    "Cuando el sistema adjunte botones interactivos de WhatsApp, invita con amabilidad a usarlos en lugar de listar textos largos.\n"
+    "3. Guía concisa y sin rodeos: Sé siempre breve y directa (1 a 2 oraciones cortas). Nunca abrumes con muros de texto ni repitas listas de fechas en texto cuando haya botones interactivos como 'Ver fechas'.\n"
     "4. Cierre proactivo: Varía tus expresiones de cortesía (ej. 'Con mucho gusto', 'Será un placer ayudarte', 'Estoy aquí para apoyarte').\n\n"
     "# FLUJO DE ATENCIÓN Y SOPORTE EN PAGOS\n"
     "- Consultas sobre eventos: Proporciona detalles claros sobre fechas, horarios, recinto, tipos de acceso y precios usando la información oficial del contexto RAG.\n"
@@ -378,7 +377,7 @@ def _call_ticket_llm(
                 "model": model_name,
                 "messages": messages,
                 "temperature": 0.35,
-                "max_tokens": 180,
+                "max_tokens": 110,
             },
             timeout=12.0,
         )
@@ -795,31 +794,31 @@ def _show_dates(client: CoreApi, session: TicketSession, user_text: str = "bolet
     if _is_greeting(lowered_q):
         instruction = (
             f"El cliente acaba de saludarte diciendo: '{user_text}'. "
-            f"Como Valeria, salúdalo por su nombre ({display_name or 'amigo'}) con muchísima calidez y amabilidad, preséntate brevemente como Valeria de CoDi Eventos "
-            f"y dile que será un verdadero placer ayudarle con sus boletos. "
-            f"Invítalo con amabilidad a tocar el botón de abajo para explorar las próximas fechas disponibles ({dates_human})."
+            f"Como Valeria de CoDi Eventos, salúdalo con calidez por su nombre ({display_name or 'amigo'}). "
+            "Sé muy breve y directa (máximo 2 oraciones cortas). "
+            "Invítalo amablemente a tocar el botón 'Ver fechas' de abajo para elegir cuándo asistir. "
+            "REGLA OBLIGATORIA: NUNCA menciones ni listes fechas en tu texto, ya que están en el botón de abajo."
         )
     elif _is_help(lowered_q):
         instruction = (
             f"El cliente necesita orientación y escribió: '{user_text}'. "
-            f"Como Valeria, salúdalo ({display_name or 'amigo'}) con mucha calidez y tranquilidad, y explícale con sencillez que aquí puede apartar sus boletos oficiales "
-            f"y pagar de forma 100% segura con CoDi® desde su banca móvil sin comisiones abusivas de boletera. "
-            f"Invítalo con una sonrisa a tocar el botón de abajo para ver las fechas disponibles."
+            f"Como Valeria, salúdalo ({display_name or 'amigo'}) con calidez y explícale en 2 oraciones breves "
+            "que aquí puede apartar sus boletos oficiales y pagar con CoDi® sin comisiones de boletera. "
+            "Invítalo a tocar el botón 'Ver fechas' de abajo para comenzar."
         )
     elif _is_event_discovery(lowered_q):
         instruction = (
             f"El cliente pregunta por los eventos o cartelera: '{user_text}'. "
-            f"Como Valeria, salúdalo ({display_name or 'amigo'}) con entusiasmo y cuéntale de las opciones disponibles en cartelera "
-            f"e invítalo a tocar el botón de abajo para elegir fecha y ver detalles y flyers de cada evento."
+            "Responde de forma muy breve y entusiasta (máximo 2 oraciones cortas). "
+            "Invítalo a tocar el botón 'Ver fechas' de abajo para explorar las opciones disponibles. "
+            "REGLA OBLIGATORIA: NUNCA menciones ni listes fechas en el texto."
         )
     else:
         instruction = (
-            f"El cliente acaba de escribir: '{user_text}'. "
-            f"Las FECHAS OFICIALES DISPONIBLES en el botón interactivo son exactamente: {dates_human}. "
-            f"Como Valeria, salúdalo por su nombre ({display_name or 'amigo'}) con mucha calidez y naturalidad, "
-            f"confirma con entusiasmo la fecha si pidió alguna de las disponibles (como el día 15, 17 o 21), "
-            f"NUNCA digas que hay un error en la fecha ni menciones el día 14, "
-            f"e invítalo a elegir la fecha en el botón de abajo."
+            f"El cliente escribió: '{user_text}'. "
+            "Responde de forma muy breve, concisa y directa (máximo 1 o 2 oraciones cortas, sin saludos largos repetitivos). "
+            "Confirma con entusiasmo e invítalo a tocar el botón 'Ver fechas' de abajo para elegir el día de su evento. "
+            "REGLA OBLIGATORIA: NUNCA menciones ni listes fechas en el texto."
         )
     llm_res = _call_ticket_llm(
         user_text,
