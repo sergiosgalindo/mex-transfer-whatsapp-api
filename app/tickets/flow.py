@@ -1118,19 +1118,24 @@ def _faq(client: CoreApi, session: TicketSession, question: str) -> ChatResponse
 
     for words, answer in _CHECKOUT_RULES:
         if any(word in folded for word in words):
-            if "spei" in words:
+            tool_out = None
+            if "spei" in words or "transferencia" in words:
+                acc = get_spei_bank_account_from_pey()
                 spei_details = _spei_account_info()
                 if spei_details:
                     answer = (
                         f"¡No te preocupes! Si prefieres o se te complica usar CoDi®, con mucho gusto puedes realizar tu pago mediante una *transferencia bancaria SPEI* directa:\n\n"
                         f"{spei_details}\n\n"
-                        f"En cuanto hagas tu transferencia, mándanos tu comprobante por aquí para confirmarte tus boletos al instante. 😊"
+                        f"En cuanto hagas tu transferencia, mándanos tu comprobante por aquí para confirmarte tus boletos al instante. 😊\n\n"
+                        f"👇 *Aquí abajo te dejo solo los dígitos de la CLABE para que los copies con un toque:*"
                     )
+                    if acc and acc.get("clabe"):
+                        tool_out = {"follow_up_text": acc["clabe"].strip()}
             llm_rule = _call_ticket_llm(
                 question,
                 session,
                 matched_sources or all_chunks[:2],
-                f"Responde con calidez a la duda del usuario sobre reglas de pago/acceso usando exactamente este dato verificado: {answer}. NO saludes de nuevo.",
+                f"Responde con calidez a la duda del usuario sobre reglas de pago/acceso usando exactamente este dato verificado: {answer}. NO saludes de nuevo. Si incluye datos bancarios o CLABE, mantén los datos bancarios exactos.",
                 is_mock_test=_is_mock_client(client),
             )
             raw_ans = (llm_rule[0] if llm_rule else answer)
@@ -1138,8 +1143,8 @@ def _faq(client: CoreApi, session: TicketSession, question: str) -> ChatResponse
             session.history.append({"role": "user", "content": question})
             session.history.append({"role": "assistant", "content": ans_body})
             if llm_rule:
-                return _reply(ans_body + hint, "CODI-TICKETS-FAQ", model_name=llm_rule[1], sources=matched_sources)
-            return _reply(ans_body + hint, "CODI-TICKETS-FAQ", sources=matched_sources)
+                return _reply(ans_body + hint, "CODI-TICKETS-FAQ", tool_output=tool_out, model_name=llm_rule[1], sources=matched_sources)
+            return _reply(ans_body + hint, "CODI-TICKETS-FAQ", tool_output=tool_out, sources=matched_sources)
 
     description = session.event_description or ""
     tokens = re.findall(r"[a-záéíóúñ0-9]{4,}", folded)

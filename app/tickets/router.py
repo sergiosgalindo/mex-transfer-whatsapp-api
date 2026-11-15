@@ -185,6 +185,16 @@ def _process_meta_webhook_sync(payload: Dict[str, Any]) -> None:
                 "text": {"preview_url": False, "body": chat_res.reply[:4000]},
             })
 
+        follow_up = (chat_res.tool_output or {}).get("follow_up_text")
+        if follow_up:
+            _send_meta_payload(phone, {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": phone,
+                "type": "text",
+                "text": {"preview_url": False, "body": str(follow_up).strip()},
+            })
+
 
 @router.get("/webhook")
 def verify_meta_webhook(
