@@ -445,6 +445,14 @@ def _is_event_discovery(lowered: str) -> bool:
 
 
 def _looks_like_question(lowered: str) -> bool:
+    if any(p in lowered for p in (
+        "no tengo codi", "no uso codi", "no se usar codi", "no sé usar codi",
+        "no puedo pagar con codi", "no me deja codi", "sin codi", "otro metodo",
+        "otro método", "otra forma", "no tengo esa app", "no tengo la app",
+        "no tengo banca", "no tengo cuenta", "transferencia", "transferir",
+        "spei", "deposito", "depósito", "como pago", "cómo pago", "donde pago", "dónde pago"
+    )):
+        return True
     if _is_greeting(lowered) or _is_help(lowered) or _is_event_discovery(lowered):
         return False
     if lowered.startswith((
@@ -465,7 +473,8 @@ def _looks_like_question(lowered: str) -> bool:
         "cumple", "cumpleaños", "cumpleañero", "cumpleañera",
         "vestimenta", "ropa", "zapatos",
         "cover", "dj", "djs", "vigencia", "expira", "puerta", "acceso",
-        "spei", "transferir", "transferencia", "clabe", "deposito", "depósito",
+        "codi", "spei", "transferir", "transferencia", "clabe", "deposito", "depósito",
+        "banco", "cuenta", "tarjeta", "metodo", "método", "pago", "pagar",
     )
     pattern = r"\b(" + "|".join(re.escape(k) for k in faq_keywords) + r")\b"
     return bool(re.search(pattern, lowered))
@@ -729,6 +738,8 @@ def handle_ticket_message(phone: str, text: str, profile_name: str = "", api: Op
                 "¿Me podrías decir con un número cuántas entradas te aparto? 😊 Por ejemplo, escribe *1*, *2* o *4*.",
                 "CODI-TICKETS-QUANTITY",
             )
+        if session.step == "confirm":
+            return _confirmation_card(session, phone)
         ff = _try_fast_forward(client, session, text)
         if ff is not None:
             return ff
@@ -1067,7 +1078,7 @@ def _step_hint(session: TicketSession) -> str:
     if session.step == "quantity" and session.ticket_name:
         return f"\n\n👉 *Para seguir con tu apartado de {session.ticket_name}:* escríbeme cuántas entradas quieres (por ejemplo: *1*, *2* o *4*)."
     if session.step == "confirm" and session.quantity and session.ticket_name:
-        return f"\n\n👉 *Tu resumen sigue listo ({session.quantity} × {session.ticket_name}):* escribe *sí* para generar tu QR CoDi®, o escríbeme otro número si quieres cambiar la cantidad."
+        return f"\n\n👉 *Tu apartado sigue listo ({session.quantity} × {session.ticket_name}):* escribe *sí* para generar tu cobro CoDi® o mándanos tu comprobante si prefieres realizar transferencia SPEI."
     if session.step == "tickets" and session.event_name:
         return f"\n\n👉 *Para continuar:* toca el botón *Elegir boleto* de arriba para *{session.event_name}*."
     return ""

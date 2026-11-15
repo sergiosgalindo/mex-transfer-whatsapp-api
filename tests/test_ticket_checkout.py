@@ -233,3 +233,26 @@ def test_thanks_addresses_profile_name_not_attendee_customer_name():
     thanks = handle_ticket_message(phone, "Gracias", "Sergio", client)
     assert "Sergio" in thanks.reply
     assert "Lucia" not in thanks.reply
+
+
+def test_user_says_no_tengo_codi_in_confirm_step():
+    client = _client()
+    phone = "525512345678"
+    clear_sessions()
+    handle_ticket_message(phone, "boletos", "Sergio", client)
+    handle_ticket_message(phone, "codi:date:2026-11-15", "Sergio", client)
+    handle_ticket_message(phone, "codi:event:evt-1", "Sergio", client)
+    handle_ticket_message(phone, "codi:ticket:tt-1", "Sergio", client)
+    handle_ticket_message(phone, "1", "Sergio", client)
+    handle_ticket_message(phone, "Sergio", "Sergio", client)
+
+    # In confirm step, user says "No tengo CODI"
+    reply = handle_ticket_message(phone, "No tengo CODI", "Sergio", client)
+    assert reply.active_use_case == "CODI-TICKETS-FAQ"
+    assert "SPEI" in reply.reply or "transferencia" in reply.reply.lower()
+    session = _SESSIONS.get(phone)
+    # Verify session step was NOT reset to dates
+    assert session.step == "confirm"
+    # Verify step hint preserves order details
+    from app.tickets.flow import _step_hint
+    assert "Tu apartado sigue listo" in _step_hint(session)
