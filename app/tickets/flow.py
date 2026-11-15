@@ -45,6 +45,10 @@ _WORD_NUMBERS = {
 }
 _CHECKOUT_RULES = (
     (
+        ("spei", "transferencia", "no tengo codi", "no me funciona codi", "no sirve codi", "no pude con codi", "otra forma de pago"),
+        "¡No te preocupes! Si por alguna razón se te complica pagar con CoDi®, con mucho gusto te apoyamos con una *transferencia bancaria SPEI* directa. Solo escribe *asesor* para pasarte los datos de cuenta y registrar tu pago de inmediato. 😊",
+    ),
+    (
         ("pagar", "pago", "vigencia", "expira", "minutos"),
         "¡Claro! 😊 Tienes *10 minutos* para completar tu pago desde que generamos tu QR de CoDi® o tu enlace; durante ese tiempo tus lugares quedan apartados para ti.",
     ),
@@ -73,13 +77,32 @@ class TicketSession:
 
 
 _TICKET_SYSTEM_PROMPT = (
-    "Eres el anfitrión oficial de CoDi Eventos en WhatsApp (español de México, cálido, amable, "
-    "empático y entusiasta, como un concierge humano real). "
-    "REGLAS ESTRICTAS:\n"
-    "1. Responde en máximo 2 a 3 oraciones cortas y naturales, usando el nombre del cliente si lo conoces.\n"
-    "2. Usa EXCLUSIVAMENTE los datos verificados del CONTEXTO RAG DEL EVENTO que se te proporciona (precios, DJs, sede, horarios, reglas, vigencia de 10 minutos, QR de un solo ingreso).\n"
-    "3. NUNCA inventes precios, promociones, DJs, estacionamiento ni datos que no estén en el contexto RAG. NUNCA digas 'No tengo ese dato en la ficha del evento' cuando el usuario solo está saludando, pidiendo boletos o cambiando la cantidad de entradas.\n"
-    "4. No generes menús de texto numerados largos cuando el sistema ya adjunta el botón interactivo de WhatsApp; invita con calidez a tocar el botón o responder el dato del paso actual."
+    "# ROL Y PERSONALIDAD\n"
+    "Eres Valeria, asesora especialista en atención al cliente y venta de boletos oficiales para CoDi Eventos. "
+    "Tu personalidad es sumamente amable, cortés, cálida y empática. Te comunicas en español de México con un tono "
+    "cercano, humano y profesional, haciendo que el usuario se sienta bienvenido, escuchado y acompañado en todo momento.\n\n"
+    "# OBJETIVO PRINCIPAL\n"
+    "Ayudar a los usuarios a resolver cualquier duda sobre los eventos disponibles y guiarlos con calidez paso a paso "
+    "para que completen su apartado y pago oficial mediante CoDi® (Cobro Digital) de forma fácil, rápida, segura y sin comisiones de boletera.\n\n"
+    "# INSTRUCCIONES DE INTERACCIÓN\n"
+    "1. Saludo cálido: Inicia siempre con calidez y entusiasmo, usando el nombre del cliente si lo conoces y poniéndote a su disposición.\n"
+    "2. Claridad y empatía: Si el usuario tiene dudas o inquietudes sobre el evento o el pago CoDi®, responde con paciencia, tranquilidad y sin tecnicismos complejos; explica todo de manera sencilla y transparente.\n"
+    "3. Guía paso a paso concisa: No abrumes con muros de texto. Responde en 2 a 3 oraciones breves, naturales y bien estructuradas. "
+    "Cuando el sistema adjunte botones interactivos de WhatsApp, invita con amabilidad a usarlos en lugar de listar textos largos.\n"
+    "4. Cierre proactivo: Varía tus expresiones de cortesía (ej. 'Con mucho gusto', 'Será un placer ayudarte', 'Estoy aquí para apoyarte').\n\n"
+    "# FLUJO DE ATENCIÓN Y SOPORTE EN PAGOS\n"
+    "- Consultas sobre eventos: Proporciona detalles claros sobre fechas, horarios, recinto, tipos de acceso y precios usando la información oficial del contexto RAG.\n"
+    "- Proceso de compra: Explica cómo seleccionar fechas, tipo de boleto, cantidad e ingresar su nombre completo para el acceso oficial.\n"
+    "- Método principal (CoDi®):\n"
+    "  * El pago principal se realiza mediante CoDi® sin comisiones de boletera. El comprador tiene 10 minutos de vigencia.\n"
+    "  * Se puede pagar de 2 formas: 1) Escaneando el código QR CoDi® desde la app de su banco (BBVA, Banorte, Santander, Azteca, etc.), o 2) Abriendo el enlace directo en su celular que conecta con su app bancaria.\n"
+    "- Alternativa de respaldo (Transferencia SPEI si CoDi® no funciona):\n"
+    "  * Si el usuario menciona que su banco no tiene CoDi®, que no sabe cómo usarlo o que tuvo dificultades técnicas con CoDi®, tranquilízalo con empatía: dile que no se preocupe, que sus lugares están protegidos y que con mucho gusto puede realizar una transferencia electrónica SPEI directa escribiendo 'asesor' o solicitándolo en el chat para brindarle los datos de cuenta y confirmar su comprobante.\n"
+    "- Entrega de accesos: En cuanto el pago se confirma en segundos, el sistema envía su boleto digital con código QR de acceso único directo a este chat de WhatsApp.\n\n"
+    "# REGLAS Y LÍMITES (GUARDRAILS)\n"
+    "- Usa EXCLUSIVAMENTE los datos verificados del CONTEXTO RAG DEL EVENTO.\n"
+    "- NUNCA inventes precios, promociones, recintos ni políticas que no estén en tu información oficial.\n"
+    "- Si el usuario reporta un problema que requiere revisión manual, discúlpate sinceramente y ofrece comunicarlo con un especialista indicando que escriba 'asesor'."
 )
 
 
@@ -270,7 +293,7 @@ def _call_ticket_llm(
         {
             "role": "system",
             "content": (
-                f"CLIENTE: {session.customer_name or 'Invitado'}\n"
+                f"CLIENTE: {session.customer_name or session.profile_name or 'Invitado'}\n"
                 f"PASO ACTUAL DEL FLUJO: {session.step}\n"
                 f"CONTEXTO RAG VERIFICADO:\n{rag_block}\n\n"
                 f"INSTRUCCIÓN DE ESTE TURNO:\n{step_instruction}"
@@ -289,7 +312,7 @@ def _call_ticket_llm(
                 "model": model_name,
                 "messages": messages,
                 "temperature": 0.35,
-                "max_tokens": 120,
+                "max_tokens": 180,
             },
             timeout=12.0,
         )
@@ -456,7 +479,7 @@ def maybe_handle_ticket(phone: str, text: str, profile_name: str = "", api: Opti
         return None
     lowered = cleaned.lower()
     # Banking inquiries when not in an active ticket checkout
-    if any(w in lowered for w in ("saldo disponible", "mi saldo", "estado de cuenta", "transferir", "transferencia", "spei", "mi tarjeta", "prestamo", "préstamo")) and phone not in _SESSIONS:
+    if any(w in lowered for w in ("saldo disponible", "mi saldo", "estado de cuenta", "prestamo", "préstamo", "mi credito")) and phone not in _SESSIONS:
         return None
     if lowered in {"salir", "asesor", "humano"}:
         _SESSIONS.pop(phone, None)
@@ -652,9 +675,9 @@ def _show_dates(client: CoreApi, session: TicketSession, user_text: str = "bolet
     display_name = session.customer_name or session.profile_name
     greeting = f"¡Hola, *{display_name}*! 👋" if display_name else "¡Hola! 👋"
     body = (
-        f"{greeting} Qué gusto saludarte.\n\n"
-        f"Con mucho gusto te ayudo a apartar tus entradas. 🎶✨ "
-        f"¿Qué día te gustaría acompañarnos? Toca el botón de abajo para elegir la fecha:"
+        f"{greeting} Soy *Valeria*, tu asesora en CoDi Eventos. ¡Qué gusto saludarte! ✨\n\n"
+        f"Con mucho gusto te acompaño para apartar tus accesos oficiales sin comisiones extra. "
+        f"¿Qué día te gustaría acompañarnos? Toca el botón de abajo para ver las fechas disponibles:"
     )
     rag_chunks = _build_event_rag_chunks(client, session)
     event_chunks = _retrieve_relevant_chunks(user_text, rag_chunks) or [
@@ -665,29 +688,29 @@ def _show_dates(client: CoreApi, session: TicketSession, user_text: str = "bolet
     lowered_q = user_text.lower().strip()
     if _is_greeting(lowered_q):
         instruction = (
-            f"El usuario acaba de saludarte diciendo: '{user_text}'. "
-            f"Salúdalo por su nombre ({display_name or 'amigo'}) con muchísima calidez y amabilidad, responde brevemente su saludo "
-            f"y dile con entusiasmo que estás listo para ayudarle a conseguir sus boletos. "
-            f"Invítalo a tocar el botón de abajo para explorar las próximas fechas disponibles ({dates_human})."
+            f"El cliente acaba de saludarte diciendo: '{user_text}'. "
+            f"Como Valeria, salúdalo por su nombre ({display_name or 'amigo'}) con muchísima calidez y amabilidad, preséntate brevemente como Valeria de CoDi Eventos "
+            f"y dile que será un verdadero placer ayudarle con sus boletos. "
+            f"Invítalo con amabilidad a tocar el botón de abajo para explorar las próximas fechas disponibles ({dates_human})."
         )
     elif _is_help(lowered_q):
         instruction = (
-            f"El usuario necesita orientación y escribió: '{user_text}'. "
-            f"Salúdalo ({display_name or 'amigo'}) y explícale en 2 oraciones muy claras y amables que aquí puede apartar sus boletos oficiales "
-            f"para los eventos y pagar al instante de forma 100% segura con CoDi® sin comisiones abusivas. "
-            f"Invítalo a tocar el botón interactivo de abajo para ver las fechas disponibles."
+            f"El cliente necesita orientación y escribió: '{user_text}'. "
+            f"Como Valeria, salúdalo ({display_name or 'amigo'}) con mucha calidez y tranquilidad, y explícale con sencillez que aquí puede apartar sus boletos oficiales "
+            f"y pagar de forma 100% segura con CoDi® desde su banca móvil sin comisiones abusivas de boletera. "
+            f"Invítalo con una sonrisa a tocar el botón de abajo para ver las fechas disponibles."
         )
     elif _is_event_discovery(lowered_q):
         instruction = (
-            f"El usuario pregunta por los eventos o cartelera: '{user_text}'. "
-            f"Salúdalo ({display_name or 'amigo'}) y cuéntale con entusiasmo de los eventos disponibles en cartelera "
-            f"e invítalo a tocar el botón de abajo para elegir fecha y ver detalles de cada evento."
+            f"El cliente pregunta por los eventos o cartelera: '{user_text}'. "
+            f"Como Valeria, salúdalo ({display_name or 'amigo'}) con entusiasmo y cuéntale de las opciones disponibles en cartelera "
+            f"e invítalo a tocar el botón de abajo para elegir fecha y ver detalles y flyers de cada evento."
         )
     else:
         instruction = (
-            f"El usuario acaba de escribir: '{user_text}'. "
+            f"El cliente acaba de escribir: '{user_text}'. "
             f"Las FECHAS OFICIALES DISPONIBLES en el botón interactivo son exactamente: {dates_human}. "
-            f"Salúdalo por su nombre ({display_name or 'amigo'}) con mucha calidez y naturalidad, "
+            f"Como Valeria, salúdalo por su nombre ({display_name or 'amigo'}) con mucha calidez y naturalidad, "
             f"confirma con entusiasmo la fecha si pidió alguna de las disponibles (como el día 15, 17 o 21), "
             f"NUNCA digas que hay un error en la fecha ni menciones el día 14, "
             f"e invítalo a elegir la fecha en el botón de abajo."
