@@ -172,4 +172,19 @@ def test_conversational_inbound_intents_lead_to_ticket_checkout():
     res3 = maybe_handle_ticket("522462168664", "necesito ayuda por favor", "Sergio", client)
     assert res3 is not None
     assert res3.active_use_case == "CODI-TICKETS-DATES"
-    assert res3.interactive_menu is not None
+
+
+def test_affirmative_follow_up_answers_faq_instead_of_resetting_dates():
+    client = _client()
+    clear_sessions()
+    # Step 1: User asks location
+    res1 = maybe_handle_ticket("522462168664", "El Social de salsa en qué lugar se realizará?", "Sergio", client)
+    assert res1 is not None
+    assert res1.active_use_case == "CODI-TICKETS-FAQ"
+
+    # Step 2: User answers affirmatively to the assistant's question
+    res2 = maybe_handle_ticket("522462168664", "Si por favor", "Sergio", client)
+    assert res2 is not None
+    # Must NOT reset to date picker menu
+    assert res2.active_use_case == "CODI-TICKETS-FAQ"
+    assert res2.interactive_menu is None

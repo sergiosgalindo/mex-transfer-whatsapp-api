@@ -282,6 +282,13 @@ _SYNONYM_MAP: Dict[str, List[str]] = {
     "cierre": ["termina", "fin", "horario", "duracion"],
     "empieza": ["inicio", "horario", "apertura", "comienza"],
     "inicio": ["empieza", "horario", "apertura", "comienza"],
+    "horarios": ["horario", "hora", "empieza", "inicio", "termina", "fin", "apertura", "cierre", "duracion"],
+    "horario": ["horarios", "hora", "empieza", "inicio", "termina", "fin", "apertura", "cierre", "duracion"],
+    "precios": ["precio", "costo", "boletos", "entradas", "valor", "tarifa", "boleto", "general"],
+    "precio": ["precios", "costo", "boletos", "entradas", "valor", "tarifa", "boleto", "general"],
+    "costo": ["precio", "precios", "boletos", "entradas", "valor", "tarifa"],
+    "cuanto": ["precio", "precios", "costo", "boletos", "entradas"],
+    "cuánto": ["precio", "precios", "costo", "boletos", "entradas"],
 }
 
 
@@ -459,6 +466,33 @@ def _looks_like_question(lowered: str) -> bool:
         "spei", "transferir", "transferencia", "clabe", "deposito", "depósito",
     )
     return any(k in lowered for k in faq_keywords)
+
+
+def _is_conversational_follow_up(lowered: str, session: TicketSession) -> bool:
+    if not session.history:
+        return False
+    norm = _norm_text(lowered)
+    affirmatives = {
+        "si", "si por favor", "si porfa", "si porfavor", "por favor", "porfa", "porfavor",
+        "claro", "claro que si", "adelante", "va", "dale",
+        "me gustaria", "me gustaria saber", "me gustaria conocer", "me interesa",
+        "quiero saber", "dime", "cuentame", "a ver", "ambos", "ambas",
+        "los dos", "los horarios", "los precios", "horarios", "precios",
+        "horario", "precio", "si ambos", "si los dos", "si quiero", "si me gustaria",
+        "los dos por favor", "ambos por favor", "los horarios por favor", "los precios por favor",
+    }
+    if norm in affirmatives:
+        return True
+    if any(norm.startswith(a) or norm.endswith(a) for a in (
+        "si por favor", "por favor", "me gustaria", "quiero saber", "claro que si", "los horarios", "los precios"
+    )):
+        return True
+    last_assistant = next((h["content"] for h in reversed(session.history) if h.get("role") == "assistant"), "")
+    if ("?" in last_assistant or "¿" in last_assistant) and norm in {
+        "si", "va", "dale", "ok", "bueno", "de acuerdo", "sale", "simon", "sii", "si!"
+    }:
+        return True
+    return False
 
 
 def _step_back(client: CoreApi, session: TicketSession) -> ChatResponse:
@@ -657,12 +691,17 @@ def handle_ticket_message(phone: str, text: str, profile_name: str = "", api: Op
                     "CODI-TICKETS-QUANTITY",
                 )
         if _is_greeting(lowered) or _is_help(lowered) or _is_event_discovery(lowered):
-            ff = _try_fast_forward(client, session, text)
-            if ff is not None:
-                return ff
-            session.step = "dates"
-            return _show_dates(client, session, text)
-        if _looks_like_question(lowered) or "?" in text:
+            has_domain_faq = any(k in lowered for k in (
+                "horario", "horarios", "precio", "precios", "donde", "dónde", "estacionamiento",
+                "alcohol", "clase", "clases", "cumple", "vestimenta", "spei", "transferencia"
+            ))
+            if not has_domain_faq:
+                ff = _try_fast_forward(client, session, text)
+                if ff is not None:
+                    return ff
+                session.step = "dates"
+                return _show_dates(client, session, text)
+        if _looks_like_question(lowered) or "?" in text or _is_conversational_follow_up(lowered, session):
             return _faq(client, session, text)
         if lowered in _TRIGGERS or (any(w in lowered for w in _TRIGGERS) and not text.startswith("codi:")):
             ff = _try_fast_forward(client, session, text)
@@ -744,7 +783,10 @@ def _show_dates(client: CoreApi, session: TicketSession, user_text: str = "bolet
         c for c in rag_chunks if c.id.startswith("RAG-EVENT-")
     ][:3]
     dates_human = ", ".join(f"{format_mexico_city_day(d)} (día {d[-2:].lstrip('0')})" for d in dates[:10])
-    session.history.clear()
+    if user_text == "codi:restart":
+        session.history.clear()
+    elif len(session.history) > 10:
+        session.history = session.history[-6:]
     lowered_q = user_text.lower().strip()
     if _is_greeting(lowered_q):
         instruction = (
@@ -1019,8 +1061,11 @@ def _step_hint(session: TicketSession) -> str:
 
 def _faq(client: CoreApi, session: TicketSession, question: str) -> ChatResponse:
     folded = question.lower()
+    last_assistant = next((h["content"] for h in reversed(session.history) if h.get("role") == "assistant"), "")
+    is_follow_up = _is_conversational_follow_up(folded, session)
+    retrieval_query = f"{last_assistant} {question}" if is_follow_up and last_assistant else question
     all_chunks = _build_event_rag_chunks(client, session)
-    matched_sources = _retrieve_relevant_chunks(question, all_chunks, session)
+    matched_sources = _retrieve_relevant_chunks(retrieval_query, all_chunks, session)
     hint = "" if _is_mock_client(client) else _step_hint(session)
 
     for words, answer in _CHECKOUT_RULES:
@@ -1040,34 +1085,58 @@ def _faq(client: CoreApi, session: TicketSession, question: str) -> ChatResponse
                 f"Responde con calidez a la duda del usuario sobre reglas de pago/acceso usando exactamente este dato verificado: {answer}",
                 is_mock_test=_is_mock_client(client),
             )
+            ans_body = (llm_rule[0] if llm_rule else answer)
+            session.history.append({"role": "user", "content": question})
+            session.history.append({"role": "assistant", "content": ans_body})
             if llm_rule:
-                return _reply(llm_rule[0] + hint, "CODI-TICKETS-FAQ", model_name=llm_rule[1], sources=matched_sources)
-            return _reply(answer + hint, "CODI-TICKETS-FAQ", sources=matched_sources)
+                return _reply(ans_body + hint, "CODI-TICKETS-FAQ", model_name=llm_rule[1], sources=matched_sources)
+            return _reply(ans_body + hint, "CODI-TICKETS-FAQ", sources=matched_sources)
 
     description = session.event_description or ""
     tokens = re.findall(r"[a-záéíóúñ0-9]{4,}", folded)
     has_desc_match = bool(description and any(token in description.lower() for token in tokens))
 
-    if has_desc_match or matched_sources:
+    if has_desc_match or matched_sources or is_follow_up:
+        if is_follow_up and last_assistant:
+            instruction = (
+                f"El cliente respondió '{question}' a tu mensaje previo ('{last_assistant}'). "
+                "Como Valeria, responde de forma sumamente amable y clara proporcionando la información que el cliente solicitó "
+                "(por ejemplo, horarios de apertura a las 20:00 hrs, clase muestra de 20:00 a 21:00 hrs, cierre a las 03:00 hrs, y precios de boletos en $0.01 MXN según las fichas RAG). "
+                "Invítalo amablemente a continuar con su compra cuando esté listo."
+            )
+        else:
+            instruction = (
+                "El usuario hizo una pregunta sobre el evento. Responde de forma cálida, natural y breve "
+                "usando únicamente los datos de las fichas RAG proporcionadas. No inventes información."
+            )
         llm_ans = _call_ticket_llm(
             question,
             session,
             matched_sources or all_chunks,
-            (
-                "El usuario hizo una pregunta sobre el evento. Responde de forma cálida, natural y breve "
-                "usando únicamente los datos de las fichas RAG proporcionadas. No inventes información."
-            ),
+            instruction,
             is_mock_test=_is_mock_client(client),
         )
         if llm_ans:
-            return _reply(llm_ans[0] + hint, "CODI-TICKETS-FAQ", model_name=llm_ans[1], sources=matched_sources)
+            reply_text = llm_ans[0]
+            session.history.append({"role": "user", "content": question})
+            session.history.append({"role": "assistant", "content": reply_text})
+            return _reply(reply_text + hint, "CODI-TICKETS-FAQ", model_name=llm_ans[1], sources=matched_sources)
         if has_desc_match:
-            return _reply(f"Según la ficha del evento: {description}{hint}", "CODI-TICKETS-FAQ", sources=matched_sources)
+            reply_text = f"Según la ficha del evento: {description}"
+            session.history.append({"role": "user", "content": question})
+            session.history.append({"role": "assistant", "content": reply_text})
+            return _reply(reply_text + hint, "CODI-TICKETS-FAQ", sources=matched_sources)
         if matched_sources:
-            return _reply(f"{matched_sources[0].answer}{hint}", "CODI-TICKETS-FAQ", sources=matched_sources)
+            reply_text = matched_sources[0].answer
+            session.history.append({"role": "user", "content": question})
+            session.history.append({"role": "assistant", "content": reply_text})
+            return _reply(reply_text + hint, "CODI-TICKETS-FAQ", sources=matched_sources)
 
+    no_data_reply = "No tengo ese dato en la ficha del evento. Puedo pasarte con una persona si escribes asesor."
+    session.history.append({"role": "user", "content": question})
+    session.history.append({"role": "assistant", "content": no_data_reply})
     return _reply(
-        "No tengo ese dato en la ficha del evento. Puedo pasarte con una persona si escribes asesor." + hint,
+        no_data_reply + hint,
         "CODI-TICKETS-FAQ",
     )
 
