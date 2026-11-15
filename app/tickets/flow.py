@@ -352,13 +352,16 @@ def _call_ticket_llm(
     if groq_key and ("groq.com" in llm_url or not llm_url):
         headers["Authorization"] = f"Bearer {groq_key}"
 
+    chat_user_name = session.profile_name or ""
+    titular_name = session.customer_name or "Por definir"
     rag_block = "\n\n".join(f"[{s.id}] ({s.category}): {s.answer}" for s in sources) if sources else "Sin datos adicionales."
     messages: List[Dict[str, str]] = [
         {"role": "system", "content": _TICKET_SYSTEM_PROMPT},
         {
             "role": "system",
             "content": (
-                f"CLIENTE: {session.customer_name or session.profile_name or 'Invitado'}\n"
+                f"CLIENTE EN WHATSAPP: {chat_user_name or 'Cliente'}\n"
+                f"TITULAR DEL BOLETO (en puerta): {titular_name}\n"
                 f"PASO ACTUAL DEL FLUJO: {session.step}\n"
                 f"CONTEXTO RAG VERIFICADO:\n{rag_block}\n\n"
                 f"INSTRUCCIÓN DE ESTE TURNO:\n{step_instruction}"
@@ -377,7 +380,7 @@ def _call_ticket_llm(
                 "model": model_name,
                 "messages": messages,
                 "temperature": 0.35,
-                "max_tokens": 110,
+                "max_tokens": 150,
             },
             timeout=12.0,
         )
@@ -398,7 +401,7 @@ def _call_ticket_llm(
                     "model": "qwen/qwen3.8-27b",
                     "messages": messages,
                     "temperature": 0.35,
-                    "max_tokens": 120,
+                    "max_tokens": 160,
                 },
                 timeout=8.0,
             )
@@ -599,27 +602,26 @@ def handle_ticket_message(phone: str, text: str, profile_name: str = "", api: Op
     session = _SESSIONS.setdefault(phone, TicketSession(profile_name=profile_name or None))
     if profile_name and not session.profile_name:
         session.profile_name = profile_name
-    display_name = session.customer_name or session.profile_name
+    chat_user_name = session.profile_name or ""
+    name_part_plain = f", {chat_user_name}" if chat_user_name else ""
+    name_part_bold = f", *{chat_user_name}*" if chat_user_name else ""
     try:
         lowered = text.lower().strip()
         if lowered in {"salir", "asesor", "humano"}:
             _SESSIONS.pop(phone, None)
-            name_part = f", {display_name}" if display_name else ""
             return _reply(
-                f"¡Listo{name_part}! Cerramos el asistente de boletos por ahora. 😊 Si necesitas hablar con alguien del equipo, escríbenos tu duda aquí abajo y con gusto te atendemos.",
+                f"¡Con gusto{name_part_plain}! Cerramos el asistente de boletos por ahora. 😊 Si necesitas hablar con alguien del equipo, escríbenos tu duda aquí abajo y con gusto te atendemos.",
                 "CODI-TICKETS-EXIT",
             )
         if any(p in lowered for p in ("ya no quiero nada", "no quiero nada", "cancelar", "olvidalo", "olvídalo", "mejor ya no")):
             _SESSIONS.pop(phone, None)
-            name_part = f", {display_name}" if display_name else ""
             return _reply(
-                f"¡No te preocupes{name_part}! Cancelamos el apartado por ahora. 😊 Cuando quieras volver a ver fechas o apartar entradas, solo escríbeme *boletos*.",
+                f"¡No te preocupes{name_part_plain}! Cancelamos el apartado con gusto. 😊 Cuando quieras volver a ver fechas o apartar entradas, solo escríbeme *boletos*. ¡Que tengas un excelente día!",
                 "CODI-TICKETS-EXIT",
             )
         if lowered in _THANKS:
-            name_part = f", {display_name}" if display_name else ""
             return _reply(
-                f"¡Con muchísimo gusto{name_part}! 😊✨ Cuando quieras ver más fechas o apartar otros boletos, solo escríbeme *boletos*. ¡Nos vemos pronto!",
+                f"¡Con muchísimo gusto{name_part_plain}! 😊✨ Ha sido un verdadero placer atenderte. Cuando quieras ver más fechas o apartar otros boletos, solo escríbeme *boletos*. ¡Que disfrutes muchísimo tu evento!",
                 "CODI-TICKETS-THANKS",
             )
         if text == "codi:restart":
@@ -681,6 +683,11 @@ def handle_ticket_message(phone: str, text: str, profile_name: str = "", api: Op
             if qty is not None:
                 return _ask_confirmation(session, phone, qty)
         if session.step in ("confirm", "paid", "quantity") and not text.startswith("codi:") and "?" not in text:
+            cleaned_potential_name = _clean_customer_name(text)
+            if cleaned_potential_name != text.strip() and len(cleaned_potential_name) >= 3 and not _looks_like_question(lowered):
+                session.customer_name = cleaned_potential_name
+                session.step = "confirm"
+                return _confirmation_card(session, phone)
             if any(w in lowered for w in ("cambiar nombre", "otro nombre", "cambiar titular", "otro titular")) or ("nombre" in lowered and session.step == "confirm"):
                 session.step = "name"
                 return _reply(
@@ -774,12 +781,12 @@ def _show_dates(client: CoreApi, session: TicketSession, user_text: str = "bolet
         {"id": f"codi:date:{day}", "title": format_mexico_city_day(day)[:24], "description": f"Ver cartelera del {format_mexico_city_day(day)}"[:72]}
         for day in dates[:10]
     ]
-    display_name = session.customer_name or session.profile_name
-    greeting = f"¡Hola, *{display_name}*! 👋" if display_name else "¡Hola! 👋"
+    chat_user_name = session.profile_name or ""
+    greeting = f"¡Hola, *{chat_user_name}*! 👋" if chat_user_name else "¡Hola! 👋"
     body = (
-        f"{greeting} Soy *Valeria*, tu asesora en CoDi Eventos. ¡Qué gusto saludarte! ✨\n\n"
-        f"Con mucho gusto te acompaño para apartar tus accesos oficiales sin comisiones extra. "
-        f"¿Qué día te gustaría acompañarnos? Toca el botón de abajo para ver las fechas disponibles:"
+        f"{greeting} Qué alegría saludarte, soy *Valeria* de CoDi Eventos. ✨ "
+        f"Será un verdadero placer acompañarte a asegurar tus accesos oficiales de forma rápida y sin comisiones de boletera.\n\n"
+        f"Para comenzar, por favor toca el botón de abajo para explorar las fechas disponibles:"
     )
     rag_chunks = _build_event_rag_chunks(client, session)
     event_chunks = _retrieve_relevant_chunks(user_text, rag_chunks) or [
@@ -794,30 +801,31 @@ def _show_dates(client: CoreApi, session: TicketSession, user_text: str = "bolet
     if _is_greeting(lowered_q):
         instruction = (
             f"El cliente acaba de saludarte diciendo: '{user_text}'. "
-            f"Como Valeria de CoDi Eventos, salúdalo con calidez por su nombre ({display_name or 'amigo'}). "
-            "Sé muy breve y directa (máximo 2 oraciones cortas). "
-            "Invítalo amablemente a tocar el botón 'Ver fechas' de abajo para elegir cuándo asistir. "
-            "REGLA OBLIGATORIA: NUNCA menciones ni listes fechas en tu texto, ya que están en el botón de abajo."
+            f"Preséntate cálidamente como Valeria de CoDi Eventos y salúdalo con gran amabilidad y cortesía por su nombre ({chat_user_name or 'amigo'}). "
+            "Dile con entusiasmo que con mucho gusto le ayudas a asegurar sus accesos oficiales sin comisiones de boletera. "
+            "Invítalo amablemente a tocar el botón 'Ver fechas' de abajo para elegir su día preferido. "
+            "Extensión: 2 a 3 oraciones naturales, cálidas y fluidas (alrededor de 200 a 250 caracteres). "
+            "REGLA OBLIGATORIA: NUNCA menciones ni listes fechas en tu texto, ya que están en el botón interactivo de abajo."
         )
     elif _is_help(lowered_q):
         instruction = (
             f"El cliente necesita orientación y escribió: '{user_text}'. "
-            f"Como Valeria, salúdalo ({display_name or 'amigo'}) con calidez y explícale en 2 oraciones breves "
-            "que aquí puede apartar sus boletos oficiales y pagar con CoDi® sin comisiones de boletera. "
-            "Invítalo a tocar el botón 'Ver fechas' de abajo para comenzar."
+            f"Como Valeria, salúdalo ({chat_user_name or 'amigo'}) con gran amabilidad y cortesía. Explícale con paciencia "
+            "que con mucho gusto le ayudas a apartar sus boletos oficiales y pagar con CoDi® sin comisiones de boletera. "
+            "Invítalo amablemente a tocar el botón 'Ver fechas' de abajo para comenzar."
         )
     elif _is_event_discovery(lowered_q):
         instruction = (
             f"El cliente pregunta por los eventos o cartelera: '{user_text}'. "
-            "Responde de forma muy breve y entusiasta (máximo 2 oraciones cortas). "
-            "Invítalo a tocar el botón 'Ver fechas' de abajo para explorar las opciones disponibles. "
+            f"Como Valeria, salúdalo ({chat_user_name or 'amigo'}) con entusiasmo y cortesía. Explícale que tenemos excelentes fechas "
+            "e invítalo cordialmente a tocar el botón 'Ver fechas' de abajo para explorar la cartelera disponible. "
             "REGLA OBLIGATORIA: NUNCA menciones ni listes fechas en el texto."
         )
     else:
         instruction = (
             f"El cliente escribió: '{user_text}'. "
-            "Responde de forma muy breve, concisa y directa (máximo 1 o 2 oraciones cortas, sin saludos largos repetitivos). "
-            "Confirma con entusiasmo e invítalo a tocar el botón 'Ver fechas' de abajo para elegir el día de su evento. "
+            f"Como Valeria, responde con amabilidad, cortesía y entusiasmo (2 oraciones fluidas). "
+            "Confirma con gusto e invítalo cordialmente a tocar el botón 'Ver fechas' de abajo para elegir el día de su evento. "
             "REGLA OBLIGATORIA: NUNCA menciones ni listes fechas en el texto."
         )
     llm_res = _call_ticket_llm(
@@ -856,12 +864,12 @@ def _show_events(client: CoreApi, session: TicketSession, day: str) -> ChatRespo
             "description": f"📍 {event.get('venue') or 'CDMX'}"[:72],
         })
     session.step = "events"
-    display_name = session.customer_name or session.profile_name
-    name_part = f", *{display_name}*" if display_name else ""
+    chat_user_name = session.profile_name or ""
+    name_part = f", *{chat_user_name}*" if chat_user_name else ""
     return _menu(
         (
-            f"¡Súper bien{name_part}! 🙌 Para el *{format_mexico_city_day(day)}* tenemos estos eventos listos para ti.\n\n"
-            f"¿A cuál te gustaría asistir? Elíbelo aquí abajo y te comparto el flyer con todos los detalles:"
+            f"¡Excelente elección{name_part}! ✨ Con gusto, para el *{format_mexico_city_day(day)}* tenemos una gran cartelera preparada para ti.\n\n"
+            f"¿A cuál te gustaría asistir? Selecciona por favor tu evento favorito en el botón de abajo y enseguida te comparto el flyer con todos los detalles:"
         ),
         "Cartelera",
         rows,
@@ -913,21 +921,22 @@ def _show_tickets(client: CoreApi, session: TicketSession, event_id: str, send_f
             "event_flyer_mime": flyer_info["mime"],
             "event_promo_text": session.event_description or f"✨ *{session.event_name}* · {venue}",
         }
+    chat_user_name = session.profile_name or ""
+    name_part = f", *{chat_user_name}*" if chat_user_name else ""
     menu_body = (
-        f"¡Excelente elección! 💃🕺✨ Se va a poner buenísimo *{session.event_name}* en *{venue}*.\n\n"
-        f"Aquí abajo puedes elegir tu tipo de boleto para apartar tus lugares (o si tienes alguna duda del evento, pregúntame con confianza):"
+        f"¡Qué gran elección{name_part}! 🎶✨ *{session.event_name}* en *{venue}* promete ser una experiencia increíble con gran música y el mejor ambiente.\n\n"
+        f"Con mucho gusto te acompaño: toca por favor el botón de abajo para elegir tu tipo de boleto, o si tienes alguna duda pregúntame con toda confianza. 😊"
     )
     rag_chunks = _build_event_rag_chunks(client, session)
-    display_name = session.customer_name or session.profile_name
     llm_res = _call_ticket_llm(
         f"Elegí el evento {session.event_name}",
         session,
         rag_chunks[:2],
         (
-            f"El cliente {display_name or ''} acaba de elegir el evento '{session.event_name}' en '{venue}'. "
-            f"Ya le enviamos arriba la imagen del flyer. Haz un comentario breve, cálido y entusiasta de 2 frases "
-            f"sobre este evento usando algún detalle real del contexto RAG (música, ambiente o sede) e invítalo a "
-            f"tocar el botón 'Elegir boleto' de aquí abajo o preguntarte cualquier duda."
+            f"El cliente {chat_user_name or ''} acaba de elegir el evento '{session.event_name}' en '{venue}'. "
+            f"Ya le enviamos arriba la imagen del flyer. Como Valeria, felicítalo con mucha calidez y cortesía por su elección. "
+            f"Haz un comentario entusiasta y amable (2 a 3 oraciones fluidas) resaltando algún detalle real de la música, el ambiente o la sede, "
+            f"e invítalo cordialmente a tocar el botón 'Elegir boleto' de abajo para continuar, o a preguntarte cualquier duda con total confianza."
         ),
         is_mock_test=_is_mock_client(client),
     )
@@ -949,18 +958,18 @@ def _show_tickets(client: CoreApi, session: TicketSession, event_id: str, send_f
 def _ask_quantity(session: TicketSession, ticket_id: str) -> ChatResponse:
     ticket = _ticket(session, ticket_id)
     if ticket is None:
-        return _reply("No encontré ese tipo de acceso. ¿Me ayudas eligiéndolo de nuevo en la lista?", "CODI-TICKETS-TICKETS")
+        return _reply("No encontré ese tipo de acceso. ¿Me ayudas eligiéndolo de nuevo en la lista? 🙏", "CODI-TICKETS-TICKETS")
     session.ticket_id = ticket_id
     session.ticket_name = ticket.get("name")
     session.unit_price = str(ticket.get("currentPrice"))
     session.step = "quantity"
     session.customer_name = None
-    display_name = session.customer_name or session.profile_name
-    name_part = f", *{display_name}*" if display_name else ""
+    chat_user_name = session.profile_name or ""
+    name_part = f", *{chat_user_name}*" if chat_user_name else ""
     return _reply(
         (
-            f"¡Perfecto{name_part}! 🎟️ El boleto *{session.ticket_name}* está en *`${session.unit_price} MXN`* por persona.\n\n"
-            f"¿Cuántas entradas te aparto? Solo escríbeme el número aquí abajo (por ejemplo: *1*, *2* o *4*). 😊"
+            f"¡Excelente{name_part}! 🎟️ El acceso *{session.ticket_name}* tiene un costo oficial de *`${session.unit_price} MXN`* por persona.\n\n"
+            f"¿Cuántas entradas te gustaría apartar? Escríbeme con toda confianza el número aquí abajo (por ejemplo: *1*, *2* o *4*) y enseguida te las preparo. 😊"
         ),
         "CODI-TICKETS-QUANTITY",
     )
@@ -978,13 +987,15 @@ def _ask_confirmation(session: TicketSession, phone: str, quantity: int) -> Chat
             "CODI-TICKETS-QUANTITY",
         )
     session.quantity = quantity
+    chat_user_name = session.profile_name or ""
+    name_part = f", {chat_user_name}" if chat_user_name else ""
     if not session.customer_name:
         session.step = "name"
         qty_label = f"*{quantity}* boleto" if quantity == 1 else f"*{quantity}* boletos"
         return _reply(
             (
-                f"¡Súper! 🙌 Apartamos {qty_label} para *{session.event_name}*.\n\n"
-                f"¿A nombre de quién dejamos tus entradas? Escribe por favor tu *nombre y apellido completo* para tu acceso oficial en puerta:"
+                f"¡Con muchísimo gusto{name_part}! 🙌 Ya tengo apartados {qty_label} para *{session.event_name}*.\n\n"
+                f"¿A nombre de quién dejamos registradas las entradas? Por favor escribe el *nombre y apellido completo* de la persona que será titular del acceso en puerta:"
             ),
             "CODI-TICKETS-NAME",
         )
@@ -999,19 +1010,19 @@ def _confirmation_card(session: TicketSession, phone: str) -> ChatResponse:
         total = str(session.unit_price)
     return _menu(
         (
-            f"📋 *Resumen de tu pedido*\n"
+            f"📋 *Resumen de tu apartado*\n"
             f"• *Evento:* {session.event_name}\n"
             f"• *Boletos:* {session.quantity} × {session.ticket_name} (`${session.unit_price} MXN` c/u)\n"
             f"• *Total a pagar:* *`${total} MXN`*\n"
-            f"• *Titular:* {session.customer_name}\n"
+            f"• *Titular en puerta:* {session.customer_name}\n"
             f"• *Teléfono:* {phone}\n\n"
-            f"¿Confirmas apartar tus lugares y generar tu cobro CoDi®?"
+            f"¿Todo se ve bien? Toca por favor *Sí, generar cobro* para recibir tu código CoDi® oficial y asegurar tus lugares de inmediato. ✨"
         ),
         "Confirmar",
         [
-            {"id": "codi:confirm:yes", "title": "Sí, generar cobro", "description": "Recibir QR CoDi y enlace"},
+            {"id": "codi:confirm:yes", "title": "Sí, generar cobro", "description": "Recibir QR CoDi y pagar"},
             {"id": "codi:confirm:qty", "title": "Cambiar cantidad", "description": "Modificar número de entradas"},
-            {"id": "codi:confirm:name", "title": "Cambiar mi nombre", "description": "Poner los boletos a otro nombre"},
+            {"id": "codi:confirm:name", "title": "Cambiar titular", "description": "Poner los boletos a otro nombre"},
             {"id": "codi:confirm:no", "title": "No, volver", "description": "Elegir otro boleto"},
         ],
         "CODI-TICKETS-CONFIRM",
@@ -1062,7 +1073,7 @@ def _step_hint(session: TicketSession) -> str:
     return ""
 
 
-def _strip_redundant_greeting(text: str, name: Optional[str] = None) -> str:
+def _strip_redundant_greeting(text: str, *names: Optional[str]) -> str:
     cleaned = (text or "").strip()
     patterns = [
         r"^(¡?\s*hola\s*[,!.]?\s*)",
@@ -1071,10 +1082,11 @@ def _strip_redundant_greeting(text: str, name: Optional[str] = None) -> str:
         r"^(¡?\s*buenas\s*noches\s*[,!.]?\s*)",
         r"^(¡?\s*qu[eé]\s*tal\s*[,!.]?\s*)",
     ]
-    if name:
-        esc_name = re.escape(name.strip())
-        patterns.insert(0, rf"^(¡?\s*hola\s*,\s*{esc_name}\s*[,!.]?\s*)")
-        patterns.insert(1, rf"^(¡?\s*hola\s+{esc_name}\s*[,!.]?\s*)")
+    for n in names:
+        if n and n.strip():
+            esc_name = re.escape(n.strip())
+            patterns.insert(0, rf"^(¡?\s*hola\s*,\s*{esc_name}\s*[,!.]?\s*)")
+            patterns.insert(1, rf"^(¡?\s*hola\s+{esc_name}\s*[,!.]?\s*)")
     for pat in patterns:
         cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE).strip()
     if cleaned and cleaned[0].islower():
@@ -1090,7 +1102,8 @@ def _faq(client: CoreApi, session: TicketSession, question: str) -> ChatResponse
     all_chunks = _build_event_rag_chunks(client, session)
     matched_sources = _retrieve_relevant_chunks(retrieval_query, all_chunks, session)
     hint = "" if _is_mock_client(client) else _step_hint(session)
-    display_name = session.customer_name or session.profile_name
+    chat_user_name = session.profile_name or ""
+    titular_name = session.customer_name or ""
 
     for words, answer in _CHECKOUT_RULES:
         if any(word in folded for word in words):
@@ -1110,7 +1123,7 @@ def _faq(client: CoreApi, session: TicketSession, question: str) -> ChatResponse
                 is_mock_test=_is_mock_client(client),
             )
             raw_ans = (llm_rule[0] if llm_rule else answer)
-            ans_body = _strip_redundant_greeting(raw_ans, display_name)
+            ans_body = _strip_redundant_greeting(raw_ans, chat_user_name, titular_name)
             session.history.append({"role": "user", "content": question})
             session.history.append({"role": "assistant", "content": ans_body})
             if llm_rule:
@@ -1145,17 +1158,17 @@ def _faq(client: CoreApi, session: TicketSession, question: str) -> ChatResponse
             is_mock_test=_is_mock_client(client),
         )
         if llm_ans:
-            reply_text = _strip_redundant_greeting(llm_ans[0], display_name)
+            reply_text = _strip_redundant_greeting(llm_ans[0], chat_user_name, titular_name)
             session.history.append({"role": "user", "content": question})
             session.history.append({"role": "assistant", "content": reply_text})
             return _reply(reply_text + hint, "CODI-TICKETS-FAQ", model_name=llm_ans[1], sources=matched_sources)
         if has_desc_match:
-            reply_text = _strip_redundant_greeting(f"Según la ficha del evento: {description}", display_name)
+            reply_text = _strip_redundant_greeting(f"Según la ficha del evento: {description}", chat_user_name, titular_name)
             session.history.append({"role": "user", "content": question})
             session.history.append({"role": "assistant", "content": reply_text})
             return _reply(reply_text + hint, "CODI-TICKETS-FAQ", sources=matched_sources)
         if matched_sources:
-            reply_text = _strip_redundant_greeting(matched_sources[0].answer, display_name)
+            reply_text = _strip_redundant_greeting(matched_sources[0].answer, chat_user_name, titular_name)
             session.history.append({"role": "user", "content": question})
             session.history.append({"role": "assistant", "content": reply_text})
             return _reply(reply_text + hint, "CODI-TICKETS-FAQ", sources=matched_sources)

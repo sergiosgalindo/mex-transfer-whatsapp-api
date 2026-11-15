@@ -215,3 +215,21 @@ def test_customer_name_with_prefix_and_substring_keywords():
     confirm2 = handle_ticket_message(phone, "Josefina Martínez", "Sergio", client)
     assert confirm2.active_use_case == "CODI-TICKETS-CONFIRM"
     assert "Josefina Martínez" in confirm2.reply
+
+
+def test_thanks_addresses_profile_name_not_attendee_customer_name():
+    client = _client()
+    phone = "525512345678"
+    clear_sessions()
+    handle_ticket_message(phone, "boletos", "Sergio", client)
+    handle_ticket_message(phone, "codi:date:2026-11-15", "Sergio", client)
+    handle_ticket_message(phone, "codi:event:evt-1", "Sergio", client)
+    handle_ticket_message(phone, "codi:ticket:tt-1", "Sergio", client)
+    handle_ticket_message(phone, "2", "Sergio", client)
+    # Tickets are registered for Lucia Giménez
+    handle_ticket_message(phone, "A nombre de Lucia Giménez", "Sergio", client)
+
+    # When Sergio says thanks, the bot must address Sergio, NOT Lucia Giménez
+    thanks = handle_ticket_message(phone, "Gracias", "Sergio", client)
+    assert "Sergio" in thanks.reply
+    assert "Lucia" not in thanks.reply
