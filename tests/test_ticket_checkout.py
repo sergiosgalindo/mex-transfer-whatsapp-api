@@ -150,3 +150,24 @@ def test_internal_send_ticket_png_decodes_and_a_duplicate_does_not_send_again():
     assert second.status_code == 200
     assert second.json()["status"] == "already_sent"
     assert len(sent_images) == 1
+
+
+def test_conversational_inbound_intents_lead_to_ticket_checkout():
+    client = _client()
+    clear_sessions()
+    res1 = maybe_handle_ticket("522462168664", "hola, ¿cómo estás?", "Sergio", client)
+    assert res1 is not None
+    assert res1.active_use_case == "CODI-TICKETS-DATES"
+    assert res1.interactive_menu is not None
+
+    clear_sessions()
+    res2 = maybe_handle_ticket("522462168664", "¿qué eventos hay este fin?", "Sergio", client)
+    assert res2 is not None
+    assert res2.active_use_case == "CODI-TICKETS-DATES"
+    assert res2.interactive_menu is not None
+
+    clear_sessions()
+    res3 = maybe_handle_ticket("522462168664", "necesito ayuda por favor", "Sergio", client)
+    assert res3 is not None
+    assert res3.active_use_case == "CODI-TICKETS-DATES"
+    assert res3.interactive_menu is not None

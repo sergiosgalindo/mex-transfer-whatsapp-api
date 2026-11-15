@@ -328,7 +328,34 @@ def clear_sessions() -> None:
     _SESSIONS.clear()
 
 
+def _is_greeting(lowered: str) -> bool:
+    return any(g in lowered for g in (
+        "hola", "buen dia", "buenos dias", "buenas tardes", "buenas noches",
+        "que tal", "qué tal", "como estas", "cómo estás", "como te va", "cómo te va",
+        "que onda", "qué onda"
+    ))
+
+
+def _is_help(lowered: str) -> bool:
+    return any(p in lowered for p in (
+        "ayuda", "necesito ayuda", "como funciona", "cómo funciona",
+        "de que trata", "de qué trata", "como compro", "cómo compro",
+        "que es esto", "qué es esto", "que es codi", "qué es codi"
+    ))
+
+
+def _is_event_discovery(lowered: str) -> bool:
+    return any(p in lowered for p in (
+        "que eventos", "qué eventos", "que hay", "qué hay",
+        "que tienen", "qué tienen", "cartelera", "que fiesta", "qué fiesta",
+        "proximos eventos", "próximos eventos", "eventos disponibles",
+        "quiero ir", "tienen eventos", "hay eventos"
+    ))
+
+
 def _looks_like_question(lowered: str) -> bool:
+    if _is_greeting(lowered) or _is_help(lowered) or _is_event_discovery(lowered):
+        return False
     if lowered.startswith((
         "hay ", "donde ", "dónde ", "a que hora", "a qué hora", "cuanto ", "cuánto ",
         "quien ", "quién ", "puedo ", "entran ", "que ", "qué ", "como ", "cómo ",
@@ -428,8 +455,8 @@ def maybe_handle_ticket(phone: str, text: str, profile_name: str = "", api: Opti
     if not cleaned:
         return None
     lowered = cleaned.lower()
-    active = phone in _SESSIONS
-    if not active and lowered not in _TRIGGERS and not any(w in lowered for w in _TRIGGERS) and not cleaned.startswith("codi:"):
+    # Banking inquiries when not in an active ticket checkout
+    if any(w in lowered for w in ("saldo disponible", "mi saldo", "estado de cuenta", "transferir", "transferencia", "spei", "mi tarjeta", "prestamo", "préstamo")) and phone not in _SESSIONS:
         return None
     if lowered in {"salir", "asesor", "humano"}:
         _SESSIONS.pop(phone, None)
@@ -546,6 +573,12 @@ def handle_ticket_message(phone: str, text: str, profile_name: str = "", api: Op
                     "¡No te preocupes! 😊 ¿Cuántas entradas te aparto en total? Escríbeme el número aquí abajo (por ejemplo: *1*, *2* o *4*):",
                     "CODI-TICKETS-QUANTITY",
                 )
+        if _is_greeting(lowered) or _is_help(lowered) or _is_event_discovery(lowered):
+            ff = _try_fast_forward(client, session, text)
+            if ff is not None:
+                return ff
+            session.step = "dates"
+            return _show_dates(client, session, text)
         if _looks_like_question(lowered) or "?" in text:
             return _faq(client, session, text)
         if lowered in _TRIGGERS or (any(w in lowered for w in _TRIGGERS) and not text.startswith("codi:")):
@@ -629,18 +662,41 @@ def _show_dates(client: CoreApi, session: TicketSession, user_text: str = "bolet
     ][:3]
     dates_human = ", ".join(f"{format_mexico_city_day(d)} (día {d[-2:].lstrip('0')})" for d in dates[:10])
     session.history.clear()
-    llm_res = _call_ticket_llm(
-        user_text,
-        session,
-        event_chunks,
-        (
+    lowered_q = user_text.lower().strip()
+    if _is_greeting(lowered_q):
+        instruction = (
+            f"El usuario acaba de saludarte diciendo: '{user_text}'. "
+            f"Salúdalo por su nombre ({display_name or 'amigo'}) con muchísima calidez y amabilidad, responde brevemente su saludo "
+            f"y dile con entusiasmo que estás listo para ayudarle a conseguir sus boletos. "
+            f"Invítalo a tocar el botón de abajo para explorar las próximas fechas disponibles ({dates_human})."
+        )
+    elif _is_help(lowered_q):
+        instruction = (
+            f"El usuario necesita orientación y escribió: '{user_text}'. "
+            f"Salúdalo ({display_name or 'amigo'}) y explícale en 2 oraciones muy claras y amables que aquí puede apartar sus boletos oficiales "
+            f"para los eventos y pagar al instante de forma 100% segura con CoDi® sin comisiones abusivas. "
+            f"Invítalo a tocar el botón interactivo de abajo para ver las fechas disponibles."
+        )
+    elif _is_event_discovery(lowered_q):
+        instruction = (
+            f"El usuario pregunta por los eventos o cartelera: '{user_text}'. "
+            f"Salúdalo ({display_name or 'amigo'}) y cuéntale con entusiasmo de los eventos disponibles en cartelera "
+            f"e invítalo a tocar el botón de abajo para elegir fecha y ver detalles de cada evento."
+        )
+    else:
+        instruction = (
             f"El usuario acaba de escribir: '{user_text}'. "
             f"Las FECHAS OFICIALES DISPONIBLES en el botón interactivo son exactamente: {dates_human}. "
             f"Salúdalo por su nombre ({display_name or 'amigo'}) con mucha calidez y naturalidad, "
             f"confirma con entusiasmo la fecha si pidió alguna de las disponibles (como el día 15, 17 o 21), "
             f"NUNCA digas que hay un error en la fecha ni menciones el día 14, "
             f"e invítalo a elegir la fecha en el botón de abajo."
-        ),
+        )
+    llm_res = _call_ticket_llm(
+        user_text,
+        session,
+        event_chunks,
+        instruction,
         is_mock_test=_is_mock_client(client),
     )
     model_used = "codi-tickets"
