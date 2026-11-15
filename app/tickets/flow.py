@@ -143,7 +143,7 @@ _TICKET_SYSTEM_PROMPT = (
     "Ayudar a los usuarios a resolver cualquier duda sobre los eventos disponibles y guiarlos con calidez paso a paso "
     "para que completen su apartado y pago oficial mediante CoDi® (Cobro Digital) de forma fácil, rápida, segura y sin comisiones de boletera.\n\n"
     "# INSTRUCCIONES DE INTERACCIÓN\n"
-    "1. Saludo cálido: Inicia siempre con calidez y entusiasmo, usando el nombre del cliente si lo conoces y poniéndote a su disposición.\n"
+    "1. Saludo inicial únicamente: Saluda cálidamente SOLO al inicio de la conversación cuando el usuario salude por primera vez. NUNCA vuelvas a saludar ('Hola...', '¡Hola, Nombre!') en dudas sobre el evento, preguntas intermedias ni en el proceso de compra si la conversación ya está iniciada.\n"
     "2. Claridad y empatía: Si el usuario tiene dudas o inquietudes sobre el evento o el pago CoDi®, responde con paciencia, tranquilidad y sin tecnicismos complejos; explica todo de manera sencilla y transparente.\n"
     "3. Guía concisa y sin rodeos: Sé siempre breve y directa (1 a 2 oraciones cortas). Nunca abrumes con muros de texto ni repitas listas de fechas en texto cuando haya botones interactivos como 'Ver fechas'.\n"
     "4. Cierre proactivo: Varía tus expresiones de cortesía (ej. 'Con mucho gusto', 'Será un placer ayudarte', 'Estoy aquí para apoyarte').\n\n"
@@ -1062,6 +1062,26 @@ def _step_hint(session: TicketSession) -> str:
     return ""
 
 
+def _strip_redundant_greeting(text: str, name: Optional[str] = None) -> str:
+    cleaned = (text or "").strip()
+    patterns = [
+        r"^(¡?\s*hola\s*[,!.]?\s*)",
+        r"^(¡?\s*buenos\s*d[ií]as\s*[,!.]?\s*)",
+        r"^(¡?\s*buenas\s*tardes\s*[,!.]?\s*)",
+        r"^(¡?\s*buenas\s*noches\s*[,!.]?\s*)",
+        r"^(¡?\s*qu[eé]\s*tal\s*[,!.]?\s*)",
+    ]
+    if name:
+        esc_name = re.escape(name.strip())
+        patterns.insert(0, rf"^(¡?\s*hola\s*,\s*{esc_name}\s*[,!.]?\s*)")
+        patterns.insert(1, rf"^(¡?\s*hola\s+{esc_name}\s*[,!.]?\s*)")
+    for pat in patterns:
+        cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE).strip()
+    if cleaned and cleaned[0].islower():
+        cleaned = cleaned[0].upper() + cleaned[1:]
+    return cleaned
+
+
 def _faq(client: CoreApi, session: TicketSession, question: str) -> ChatResponse:
     folded = question.lower()
     last_assistant = next((h["content"] for h in reversed(session.history) if h.get("role") == "assistant"), "")
@@ -1070,6 +1090,7 @@ def _faq(client: CoreApi, session: TicketSession, question: str) -> ChatResponse
     all_chunks = _build_event_rag_chunks(client, session)
     matched_sources = _retrieve_relevant_chunks(retrieval_query, all_chunks, session)
     hint = "" if _is_mock_client(client) else _step_hint(session)
+    display_name = session.customer_name or session.profile_name
 
     for words, answer in _CHECKOUT_RULES:
         if any(word in folded for word in words):
@@ -1085,10 +1106,11 @@ def _faq(client: CoreApi, session: TicketSession, question: str) -> ChatResponse
                 question,
                 session,
                 matched_sources or all_chunks[:2],
-                f"Responde con calidez a la duda del usuario sobre reglas de pago/acceso usando exactamente este dato verificado: {answer}",
+                f"Responde con calidez a la duda del usuario sobre reglas de pago/acceso usando exactamente este dato verificado: {answer}. NO saludes de nuevo.",
                 is_mock_test=_is_mock_client(client),
             )
-            ans_body = (llm_rule[0] if llm_rule else answer)
+            raw_ans = (llm_rule[0] if llm_rule else answer)
+            ans_body = _strip_redundant_greeting(raw_ans, display_name)
             session.history.append({"role": "user", "content": question})
             session.history.append({"role": "assistant", "content": ans_body})
             if llm_rule:
@@ -1105,12 +1127,15 @@ def _faq(client: CoreApi, session: TicketSession, question: str) -> ChatResponse
                 f"El cliente respondió '{question}' a tu mensaje previo ('{last_assistant}'). "
                 "Como Valeria, responde de forma sumamente amable y clara proporcionando la información que el cliente solicitó "
                 "(por ejemplo, horarios de apertura a las 20:00 hrs, clase muestra de 20:00 a 21:00 hrs, cierre a las 03:00 hrs, y precios de boletos en $0.01 MXN según las fichas RAG). "
+                "REGLA CRÍTICA: NO saludes ni digas 'Hola' ni 'Hola, Nombre', ve directo a la información. "
                 "Invítalo amablemente a continuar con su compra cuando esté listo."
             )
         else:
             instruction = (
-                "El usuario hizo una pregunta sobre el evento. Responde de forma cálida, natural y breve "
-                "usando únicamente los datos de las fichas RAG proporcionadas. No inventes información."
+                "El usuario hizo una pregunta sobre el evento. Responde de forma cálida, natural, breve y directa "
+                "usando únicamente los datos de las fichas RAG proporcionadas. No inventes información. "
+                "REGLA CRÍTICA: NO saludes ni digas 'Hola' ni 'Hola, Nombre' porque la conversación ya está en curso. "
+                "Responde directamente a su duda en 1 o 2 oraciones."
             )
         llm_ans = _call_ticket_llm(
             question,
@@ -1120,17 +1145,17 @@ def _faq(client: CoreApi, session: TicketSession, question: str) -> ChatResponse
             is_mock_test=_is_mock_client(client),
         )
         if llm_ans:
-            reply_text = llm_ans[0]
+            reply_text = _strip_redundant_greeting(llm_ans[0], display_name)
             session.history.append({"role": "user", "content": question})
             session.history.append({"role": "assistant", "content": reply_text})
             return _reply(reply_text + hint, "CODI-TICKETS-FAQ", model_name=llm_ans[1], sources=matched_sources)
         if has_desc_match:
-            reply_text = f"Según la ficha del evento: {description}"
+            reply_text = _strip_redundant_greeting(f"Según la ficha del evento: {description}", display_name)
             session.history.append({"role": "user", "content": question})
             session.history.append({"role": "assistant", "content": reply_text})
             return _reply(reply_text + hint, "CODI-TICKETS-FAQ", sources=matched_sources)
         if matched_sources:
-            reply_text = matched_sources[0].answer
+            reply_text = _strip_redundant_greeting(matched_sources[0].answer, display_name)
             session.history.append({"role": "user", "content": question})
             session.history.append({"role": "assistant", "content": reply_text})
             return _reply(reply_text + hint, "CODI-TICKETS-FAQ", sources=matched_sources)
