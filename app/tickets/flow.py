@@ -994,9 +994,7 @@ def _charge(client: CoreApi, session: TicketSession, phone: str) -> ChatResponse
         f"🎟️ *Apartado:* {charged.get('quantity')} entrada(s) · *{session.event_name or 'Evento'}*\n"
         f"⏳ *Vence:* {exp_str}\n\n"
         f"*¿Cómo pagar?*\n"
-        f"1️⃣ *Con QR CoDi®:* Abre la app de tu banco, entra a *CoDi® → Pagar / Escanear QR* y escanea esta imagen.\n"
-        f"2️⃣ *Desde este mismo celular:* Abre el enlace de pago:\n"
-        f"🔗 {link}"
+        f"Abre la app de tu banco, entra a *CoDi® → Pagar / Escanear QR* y escanea esta imagen."
     )
     return _reply(reply, "CODI-TICKETS-CHARGE", {
         "codi_qr_png_b64": base64.b64encode(png).decode("ascii"),

@@ -74,7 +74,9 @@ def test_checkout_sends_a_decodable_codi_qr_and_the_payment_link():
     assert "525512345678" in confirm.reply
     assert "Ana López" in confirm.reply
     charged = handle_ticket_message(phone, "codi:confirm:yes", "Ana López", client)
-    assert "https://pay.example/link/ord-1" in charged.reply
+    assert "Pagar / Escanear QR" in charged.reply
+    assert "https://pay.example/link/ord-1" not in charged.reply
+    assert charged.tool_output["paymentLinkUrl"] == "https://pay.example/link/ord-1"
     assert _decode(base64.b64decode(charged.tool_output["codi_qr_png_b64"])) == "CODI|360.00|1"
 
 
