@@ -250,11 +250,17 @@ def _call_ticket_llm(
 ) -> Optional[Tuple[str, str]]:
     if is_mock_test or os.getenv("DISABLE_TICKET_LLM", "false").lower() == "true":
         return None
-    llm_url = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1/chat/completions").strip()
-    model_name = os.getenv("LLM_MODEL") or os.getenv("GROQ_MODEL") or "llama3.1:8b"
     groq_key = os.getenv("GROQ_API_KEY", "").strip()
+    llm_url = os.getenv("LLM_BASE_URL", "").strip()
+    if not llm_url:
+        if groq_key:
+            llm_url = "https://api.groq.com/openai/v1/chat/completions"
+        else:
+            llm_url = "http://localhost:11434/v1/chat/completions"
+
+    model_name = os.getenv("GROQ_MODEL") or os.getenv("LLM_MODEL") or ("openai/gpt-oss-20b" if groq_key else "llama3.1:8b")
     headers: Dict[str, str] = {"Content-Type": "application/json"}
-    if "localhost:11434" not in llm_url and "127.0.0.1:11434" not in llm_url and groq_key:
+    if groq_key and ("groq.com" in llm_url or not llm_url):
         headers["Authorization"] = f"Bearer {groq_key}"
 
     rag_block = "\n\n".join(f"[{s.id}] ({s.category}): {s.answer}" for s in sources) if sources else "Sin datos adicionales."
@@ -282,9 +288,9 @@ def _call_ticket_llm(
                 "model": model_name,
                 "messages": messages,
                 "temperature": 0.35,
-                "max_tokens": 110,
+                "max_tokens": 120,
             },
-            timeout=18.0,
+            timeout=12.0,
         )
         if resp.status_code == 200:
             content = ((resp.json().get("choices") or [{}])[0].get("message") or {}).get("content", "").strip()
@@ -293,26 +299,27 @@ def _call_ticket_llm(
                 return content, model_name
     except Exception as exc:
         print(f"[TicketFlow LLM Fallback] primary err={exc!r}", flush=True)
-    if groq_key:
+
+    if groq_key and model_name != "qwen/qwen3.8-27b":
         try:
             resp2 = httpx.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
                 json={
-                    "model": "openai/gpt-oss-20b",
+                    "model": "qwen/qwen3.8-27b",
                     "messages": messages,
                     "temperature": 0.35,
                     "max_tokens": 120,
                 },
-                timeout=6.0,
+                timeout=8.0,
             )
             if resp2.status_code == 200:
                 content2 = ((resp2.json().get("choices") or [{}])[0].get("message") or {}).get("content", "").strip()
                 if content2:
-                    print(f"[TicketFlow LLM+RAG] model=groq/gpt-oss-20b sources={[s.id for s in sources]} reply={content2!r}", flush=True)
-                    return content2, "openai/gpt-oss-20b"
-        except Exception:
-            pass
+                    print(f"[TicketFlow LLM+RAG] model=groq/qwen sources={[s.id for s in sources]} reply={content2!r}", flush=True)
+                    return content2, "qwen/qwen3.8-27b"
+        except Exception as exc2:
+            print(f"[TicketFlow LLM Fallback] secondary err={exc2!r}", flush=True)
     return None
 
 
@@ -870,6 +877,8 @@ def _faq(client: CoreApi, session: TicketSession, question: str) -> ChatResponse
             return _reply(llm_ans[0] + hint, "CODI-TICKETS-FAQ", model_name=llm_ans[1], sources=matched_sources)
         if has_desc_match:
             return _reply(f"Según la ficha del evento: {description}{hint}", "CODI-TICKETS-FAQ", sources=matched_sources)
+        if matched_sources:
+            return _reply(f"{matched_sources[0].answer}{hint}", "CODI-TICKETS-FAQ", sources=matched_sources)
 
     return _reply(
         "No tengo ese dato en la ficha del evento. Puedo pasarte con una persona si escribes asesor." + hint,
