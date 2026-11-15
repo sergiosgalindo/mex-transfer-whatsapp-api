@@ -778,7 +778,7 @@ def _show_dates(client: CoreApi, session: TicketSession, user_text: str = "bolet
     if not dates:
         return _reply("Por ahora no tenemos fechas con boletos disponibles, pero muy pronto abriremos nuevas fechas. ✨", "CODI-TICKETS-DATES")
     rows = [
-        {"id": f"codi:date:{day}", "title": format_mexico_city_day(day)[:24], "description": f"Ver cartelera del {format_mexico_city_day(day)}"[:72]}
+        {"id": f"codi:date:{day}", "title": format_mexico_city_day(day)[:24]}
         for day in dates[:10]
     ]
     chat_user_name = session.profile_name or ""
