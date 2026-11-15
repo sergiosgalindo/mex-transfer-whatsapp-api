@@ -1,4 +1,4 @@
-name: Python CI (mex-transfer-whatsapp-api)
+name: Python CI/CD (mex-transfer-whatsapp-api)
 
 on:
   push:
@@ -30,3 +30,23 @@ jobs:
         DISABLE_TICKET_LLM: "true"
       run: |
         PYTHONPATH=. pytest tests/ -v
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to Remote VM via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.GCP_HOST }}
+          username: ${{ secrets.GCP_USER }}
+          key: ${{ secrets.GCP_SSH_KEY }}
+          script: |
+            set -e
+            cd /home/ubuntu/codi/mex-transfer-whatsapp-api
+            git fetch origin main
+            git reset --hard origin/main
+            cd /home/ubuntu/codi
+            docker compose build bot
+            docker compose up -d bot
