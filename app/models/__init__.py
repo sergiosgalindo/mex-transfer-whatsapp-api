@@ -1,1 +1,1 @@
-"""Models package for database, schemas, RAG assistant, safety, and WhatsApp orchestration."""
+"""Response models used by the ticket conversation."""

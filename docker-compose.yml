@@ -1,45 +1,19 @@
 services:
-  fintech-db:
-    image: pgvector/pgvector:pg16
-    container_name: fintech-postgres-db
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-fintech_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fintech_pass}
-      POSTGRES_DB: ${POSTGRES_DB:-fintech_db}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
-    volumes:
-      - fintech_pgdata:/var/lib/postgresql/data
-      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/01-init-extensions.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fintech_user} -d ${POSTGRES_DB:-fintech_db}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  fintech-api:
+  whatsapp-api:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: fintech-omnichannel-api
+    container_name: mex-transfer-whatsapp-api
     restart: unless-stopped
-    depends_on:
-      fintech-db:
-        condition: service_healthy
-    env_file:
-      - .env
     environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-fintech_user}:${POSTGRES_PASSWORD:-fintech_pass}@fintech-db:5432/${POSTGRES_DB:-fintech_db}
-      LLM_BASE_URL: ${DOCKER_LLM_BASE_URL:-http://host.docker.internal:11434/v1/chat/completions}
-      LLM_MODEL: ${LLM_MODEL:-llama3.1:8b}
+      CODI_CORE_API_URL: ${CODI_CORE_API_URL:-http://host.docker.internal:8080}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
+      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
+      PHONE_NUMBER_ID: ${PHONE_NUMBER_ID:-}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:-verify-token-123}
+      WHATSAPP_API_VERSION: ${WHATSAPP_API_VERSION:-v25.0}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
     ports:
       - "${APP_PORT:-8000}:8000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    volumes:
-      - fintech_hf_cache:/app/.cache/huggingface
-
-volumes:
-  fintech_pgdata:
-  fintech_hf_cache:

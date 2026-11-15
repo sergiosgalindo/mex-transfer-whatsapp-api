@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import unicodedata
@@ -86,23 +87,52 @@ def _norm_text(s: str) -> str:
     return "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
 
 
+_EVENT_KB_FILE = os.path.join(os.path.dirname(__file__), "event_knowledge_base.json")
+
+
+def _load_event_kb() -> List[RetrievedSource]:
+    sources: List[RetrievedSource] = []
+    if os.path.exists(_EVENT_KB_FILE):
+        try:
+            with open(_EVENT_KB_FILE, "r", encoding="utf-8") as f:
+                raw_items = json.load(f)
+                for item in raw_items:
+                    kws = " ".join(item.get("keywords") or [])
+                    sources.append(
+                        RetrievedSource(
+                            id=item.get("id") or "RAG-KB",
+                            category=item.get("category") or "Información del Evento",
+                            question=f"{item.get('question')} {kws}".strip(),
+                            answer=item.get("answer") or "",
+                            score=0.95,
+                        )
+                    )
+        except Exception as exc:
+            print(f"[EventKB Load Warning] {exc!r}", flush=True)
+    return sources
+
+
 def _build_event_rag_chunks(client: CoreApi, session: "TicketSession") -> List[RetrievedSource]:
-    chunks: List[RetrievedSource] = [
-        RetrievedSource(
-            id="RAG-CODI-RULE-HOLD",
-            category="Reglas de Pago CoDi",
-            question="¿Cuánto tiempo tengo para pagar el QR CoDi o enlace y cuánto dura el apartado?",
-            answer="El cobro CoDi y el apartado de tus entradas duran 10 minutos a partir de que se genera el QR.",
-            score=0.95,
-        ),
-        RetrievedSource(
-            id="RAG-CODI-RULE-DOOR",
-            category="Acceso y Puerta",
-            question="¿Cómo funciona el QR de entrada en la puerta del evento?",
-            answer="El QR de entrada es estilo cine y admite un solo ingreso grupal en puerta para todas las entradas de tu orden.",
-            score=0.95,
-        ),
-    ]
+    chunks: List[RetrievedSource] = []
+    if not _is_mock_client(client):
+        chunks.extend(_load_event_kb())
+    if not chunks:
+        chunks = [
+            RetrievedSource(
+                id="RAG-CODI-RULE-HOLD",
+                category="Reglas de Pago CoDi",
+                question="¿Cuánto tiempo tengo para pagar el QR CoDi o enlace y cuánto dura el apartado?",
+                answer="El cobro CoDi y el apartado de tus entradas duran 10 minutos a partir de que se genera el QR.",
+                score=0.95,
+            ),
+            RetrievedSource(
+                id="RAG-CODI-RULE-DOOR",
+                category="Acceso y Puerta",
+                question="¿Cómo funciona el QR de entrada en la puerta del evento?",
+                answer="El QR de entrada es estilo cine y admite un solo ingreso grupal en puerta para todas las entradas de tu orden.",
+                score=0.95,
+            ),
+        ]
     events_list = list(session.events or [])
     if not events_list:
         try:
@@ -120,17 +150,18 @@ def _build_event_rag_chunks(client: CoreApi, session: "TicketSession") -> List[R
             for t in (ev.get("ticketTypes") or [])
         )
         content = (
-            f"Evento: {event_name}. Lugar/Sede: {event_venue}. Fecha/Hora: {event_starts}. "
+            f"Evento: {event_name}. Lugar/Sede/Dirección: {event_venue}. "
+            f"Fecha/Hora de inicio: {event_starts}. "
             f"Boletos disponibles: {tickets_desc}. "
-            f"Detalles y Flyer del evento: {event_description}"
+            f"Detalles, flyer, reglas y programa del evento: {event_description}"
         )
         chunks.append(
             RetrievedSource(
                 id=f"RAG-EVENT-{event_id[:8]}",
                 category=f"Ficha del Evento: {event_name}",
-                question=f"Información, detalles, flyer, DJs, reglas y boletos de {event_name}",
+                question=f"Información general, detalles, flyer, DJs, reglas, boletos, sede, dirección, ubicación, horarios de {event_name}",
                 answer=content,
-                score=0.9,
+                score=0.92,
             )
         )
     if session.event_description and not any(session.event_description in c.answer for c in chunks):
@@ -138,7 +169,7 @@ def _build_event_rag_chunks(client: CoreApi, session: "TicketSession") -> List[R
             RetrievedSource(
                 id="RAG-ACTIVE-EVENT",
                 category=f"Ficha del Evento: {session.event_name or 'Actual'}",
-                question=f"Detalles de {session.event_name or 'evento'}",
+                question=f"Detalles específicos de {session.event_name or 'evento'}",
                 answer=session.event_description,
                 score=0.95,
             )
@@ -146,17 +177,59 @@ def _build_event_rag_chunks(client: CoreApi, session: "TicketSession") -> List[R
     return chunks
 
 
-def _retrieve_relevant_chunks(query: str, chunks: List[RetrievedSource]) -> List[RetrievedSource]:
+_SYNONYM_MAP: Dict[str, List[str]] = {
+    "donde": ["direccion", "ubicacion", "sede", "lugar", "berraca", "reforma"],
+    "dónde": ["direccion", "ubicacion", "sede", "lugar", "berraca", "reforma"],
+    "direccion": ["ubicacion", "sede", "lugar", "berraca", "reforma", "llegar", "mapa"],
+    "dirección": ["ubicacion", "sede", "lugar", "berraca", "reforma", "llegar", "mapa"],
+    "ubicacion": ["direccion", "sede", "lugar", "berraca", "reforma", "llegar", "mapa"],
+    "ubicación": ["direccion", "sede", "lugar", "berraca", "reforma", "llegar", "mapa"],
+    "alcohol": ["bebidas", "descorche", "cerveza", "tragos", "barra"],
+    "alchool": ["bebidas", "descorche", "cerveza", "tragos", "barra"],
+    "descorche": ["bebidas", "alcohol", "botellas", "alimentos", "ingresar"],
+    "cerveza": ["bebidas", "alcohol", "barra", "chelas"],
+    "tragos": ["bebidas", "alcohol", "barra", "cocteleria"],
+    "estacionamiento": ["parking", "valet", "coche", "auto", "pension"],
+    "estacionar": ["estacionamiento", "parking", "valet", "coche", "auto"],
+    "clases": ["clase", "taller", "baile", "aprender"],
+    "clase": ["clases", "taller", "baile", "aprender"],
+    "taller": ["clase", "clases", "baile", "aprender"],
+    "termina": ["fin", "cierre", "horario", "duracion", "noche"],
+    "fin": ["termina", "cierre", "horario", "duracion"],
+    "cierre": ["termina", "fin", "horario", "duracion"],
+    "empieza": ["inicio", "horario", "apertura", "comienza"],
+    "inicio": ["empieza", "horario", "apertura", "comienza"],
+}
+
+
+def _retrieve_relevant_chunks(
+    query: str,
+    chunks: List[RetrievedSource],
+    session: Optional["TicketSession"] = None,
+) -> List[RetrievedSource]:
     norm_q = _norm_text(query)
-    q_tokens = [tok for tok in re.findall(r"[a-z0-9]{3,}", norm_q) if tok not in {"hay", "que", "como", "para", "del", "las", "los", "una", "con", "por"}]
-    if not q_tokens:
+    raw_tokens = [tok for tok in re.findall(r"[a-z0-9]{3,}", norm_q) if tok not in {"hay", "que", "como", "para", "del", "las", "los", "una", "con", "por"}]
+    if not raw_tokens:
         return []
+    q_tokens = set(raw_tokens)
+    for tok in raw_tokens:
+        if tok in _SYNONYM_MAP:
+            for syn in _SYNONYM_MAP[tok]:
+                q_tokens.add(_norm_text(syn))
+
     matched: List[Tuple[float, RetrievedSource]] = []
+    active_ev_id = session.event_id if session else None
+    active_ev_name = _norm_text(session.event_name or "") if session else ""
+
     for ch in chunks:
         haystack = _norm_text(f"{ch.category} {ch.question} {ch.answer}")
         hits = sum(1 for tok in q_tokens if tok in haystack)
         if hits > 0:
             score = round(min(0.99, 0.5 + (hits / len(q_tokens)) * 0.49), 3)
+            if active_ev_id and active_ev_id[:8] in ch.id:
+                score = min(0.99, score + 0.15)
+            elif active_ev_name and active_ev_name in _norm_text(ch.category):
+                score = min(0.99, score + 0.10)
             matched.append((score, RetrievedSource(
                 id=ch.id,
                 category=ch.category,
@@ -165,7 +238,7 @@ def _retrieve_relevant_chunks(query: str, chunks: List[RetrievedSource]) -> List
                 score=score,
             )))
     matched.sort(key=lambda x: x[0], reverse=True)
-    return [m[1] for m in matched[:3]]
+    return [m[1] for m in matched[:4]]
 
 
 def _call_ticket_llm(
@@ -251,13 +324,21 @@ def _looks_like_question(lowered: str) -> bool:
     if lowered.startswith((
         "hay ", "donde ", "dónde ", "a que hora", "a qué hora", "cuanto ", "cuánto ",
         "quien ", "quién ", "puedo ", "entran ", "que ", "qué ", "como ", "cómo ",
-        "cual ", "cuál ", "tienen ", "se puede ", "duda",
+        "cual ", "cuál ", "tienen ", "se puede ", "duda", "tienes ", "venden ",
+        "habra ", "habrá ", "tendra ", "tendrá ", "venderan ", "venderán ", "pueden ",
+        "se podra ", "se podrá ", "se permite ", "cuentan con ",
     )):
         return True
     faq_keywords = (
-        "estacionamiento", "ubicacion", "ubicación", "direccion", "dirección",
-        "horario", "cover", "dj", "bebida", "alimento", "comida", "cumple",
-        "vigencia", "expira", "puerta",
+        "estacionamiento", "estacionar", "valet", "parking", "coche", "coches", "auto", "autos", "carros",
+        "ubicacion", "ubicación", "direccion", "dirección", "lugar", "sede", "llegar", "mapa",
+        "horario", "horarios", "empieza", "inicio", "comienza", "termina", "fin", "cierre",
+        "clase", "clases", "taller", "aprender",
+        "descorche", "alcohol", "alchool", "cerveza", "trago", "tragos", "bebida", "bebidas", "tomar", "barra",
+        "comida", "alimento", "alimentos", "cenar", "botana",
+        "cumple", "cumpleaños", "cumpleañero", "cumpleañera",
+        "vestimenta", "ropa", "zapatos",
+        "cover", "dj", "djs", "vigencia", "expira", "puerta", "acceso",
     )
     return any(k in lowered for k in faq_keywords)
 
@@ -754,7 +835,7 @@ def _step_hint(session: TicketSession) -> str:
 def _faq(client: CoreApi, session: TicketSession, question: str) -> ChatResponse:
     folded = question.lower()
     all_chunks = _build_event_rag_chunks(client, session)
-    matched_sources = _retrieve_relevant_chunks(question, all_chunks)
+    matched_sources = _retrieve_relevant_chunks(question, all_chunks, session)
     hint = "" if _is_mock_client(client) else _step_hint(session)
 
     for words, answer in _CHECKOUT_RULES:

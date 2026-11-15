@@ -1,1 +1,1 @@
-"""Omnichannel Financial Services Assistant package."""
+"""WhatsApp bridge for the CoDi ticket checkout."""

@@ -1,0 +1,72 @@
+[
+  {
+    "id": "RAG-FAQ-DIRECCION",
+    "category": "Ubicación y Dirección",
+    "question": "¿Dónde es el evento, cuál es la dirección, ubicación exacta, sede y cómo llegar?",
+    "keywords": ["donde", "dónde", "direccion", "dirección", "ubicacion", "ubicación", "lugar", "sede", "salon", "salón", "recinto", "llegar", "mapa", "queda", "referencia", "referencias"],
+    "answer": "El Social de Salsa se realiza en La Berraca (Salón Reforma), sobre Av. Paseo de la Reforma, con excelente conectividad cerca de estaciones de transporte y fácil acceso en taxi de aplicación (Uber/Didi)."
+  },
+  {
+    "id": "RAG-FAQ-HORARIOS",
+    "category": "Horarios y Duración",
+    "question": "¿A qué hora empieza y a qué hora termina el evento? ¿Cuál es el horario de acceso y cierre?",
+    "keywords": ["horario", "horarios", "hora", "empieza", "inicio", "comienza", "inicia", "abre", "apertura", "termina", "fin", "finaliza", "cierre", "acaba", "duracion", "duración"],
+    "answer": "La apertura de puertas y recepción comienza a las 8:00 P.M. (20:00 hrs). El baile social y la música en vivo continúan toda la noche hasta las 2:30 A.M. / 3:00 A.M. aproximadamente."
+  },
+  {
+    "id": "RAG-FAQ-CLASES",
+    "category": "Clases y Talleres Previos",
+    "question": "¿Habrá clases de baile o taller antes del evento social? ¿Tienen costo adicional?",
+    "keywords": ["clase", "clases", "taller", "talleres", "aprender", "ensenan", "enseñan", "curso", "baile", "pasos", "muestra", "antes"],
+    "answer": "¡Sí! De 8:00 P.M. a 9:00 P.M. se imparte una clase muestra / taller introductorio de salsa y bachata para calentar motores, incluida sin costo adicional con tu boleto de entrada."
+  },
+  {
+    "id": "RAG-FAQ-BEBIDAS-ALCOHOL",
+    "category": "Bebidas, Alcohol y Descorche",
+    "question": "¿Hay descorche, se pueden meter bebidas o venden alcohol, cerveza y comida dentro?",
+    "keywords": ["descorche", "alcohol", "alchool", "cerveza", "cervezas", "chela", "chelas", "bebida", "bebidas", "tomar", "trago", "tragos", "botella", "botellas", "barra", "bar", "comida", "alimento", "alimentos", "cenar", "botana", "botanas"],
+    "answer": "No se permite ingresar con alimentos ni bebidas ajenas al evento (no hay servicio de descorche). Dentro del recinto contamos con servicio de barra con venta de cervezas, destilados, coctelería, refrescos, agua y botanas."
+  },
+  {
+    "id": "RAG-FAQ-ESTACIONAMIENTO",
+    "category": "Estacionamiento y Transporte",
+    "question": "¿Hay estacionamiento para coches, pensión o servicio de valet parking?",
+    "keywords": ["estacionamiento", "estacionar", "valet", "parking", "coche", "coches", "auto", "autos", "carro", "carros", "pension", "pensión", "estacionarme", "donde dejar"],
+    "answer": "El recinto cuenta con pensión y estacionamiento público vigilado a unos metros sobre la misma avenida, además de zona cómoda para descenso y recogida de taxis de aplicación (Uber/Didi)."
+  },
+  {
+    "id": "RAG-FAQ-CUMPLEANOS",
+    "category": "Promoción Cumpleañeros",
+    "question": "¿Cómo funciona la promoción de cumpleañeros del mes? ¿Entran gratis?",
+    "keywords": ["cumple", "cumpleaños", "cumpleanos", "cumpleañero", "cumpleañera", "mes", "promocion", "promoción", "gratis", "ine", "credencial"],
+    "answer": "¡El cumpleañer@ del mes entra gratis! Solo debes presentar tu identificación oficial (INE o credencial con fecha de nacimiento) en puerta al llegar para hacer válida la cortesía."
+  },
+  {
+    "id": "RAG-FAQ-VESTIMENTA",
+    "category": "Código de Vestimenta y Calzado",
+    "question": "¿Cuál es el código de vestimenta y qué tipo de zapatos se recomiendan?",
+    "keywords": ["vestimenta", "ropa", "vestir", "dress code", "codigo", "código", "zapatos", "calzado", "tenis", "tacon", "tacón", "tacones"],
+    "answer": "El código es casual elegante o ropa cómoda para bailar. Se sugiere llevar calzado cómodo o zapatos especiales de baile con suela lisa/gamuza para disfrutar al máximo la pista."
+  },
+  {
+    "id": "RAG-FAQ-MUSICA-DJS",
+    "category": "Música y Ritmos",
+    "question": "¿Qué ritmos tocarán y quiénes son los DJs del evento?",
+    "keywords": ["musica", "música", "dj", "djs", "ritmos", "salsa", "bachata", "cumbia", "alexio", "cachita", "toca", "tocan"],
+    "answer": "La pista tendrá la mejor selección de Salsa (dura, romántica y timba), Bachata (sensual y tradicional) y Cumbia a cargo de DJ Cachita y DJ Alexio en vivo."
+  },
+  {
+    "id": "RAG-FAQ-REGLAS-PAGO-CODI",
+    "category": "Reglas de Pago CoDi®",
+    "question": "¿Cuánto tiempo tengo para pagar el cobro CoDi® y cómo funciona el apartado?",
+    "keywords": ["pagar", "pago", "vigencia", "expira", "minutos", "cuanto tiempo", "cuánto tiempo", "apartado", "apartar", "tiempo"],
+    "answer": "El cobro CoDi® y el apartado de tus entradas duran 10 minutos a partir de que se genera el QR o enlace; durante ese tiempo tus lugares quedan reservados para ti."
+  },
+  {
+    "id": "RAG-FAQ-ACCESO-PUERTA",
+    "category": "Acceso y Puerta",
+    "question": "¿Cómo funciona el código QR de acceso en la puerta del evento?",
+    "keywords": ["puerta", "ingreso", "escaneo", "entrar", "acceso", "cine", "qr de entrada", "boleto", "credencial"],
+    "answer": "Tu código QR de entrada es estilo cine 🎟️: con un solo escaneo en la puerta ingresan todas las personas incluidas en tu orden al llegar juntas."
+  }
+]

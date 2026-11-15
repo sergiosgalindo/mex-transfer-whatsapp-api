@@ -6,13 +6,13 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, FastAPI, Header, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from app.models.schemas import ChatResponse
 from app.tickets.delivery import deliver_image
-from app.tickets.flow import core_from_env, handle_ticket_message
+from app.tickets.flow import core_from_env, handle_ticket_message, maybe_handle_ticket
 from app.tickets.qr_images import render_entry_ticket
 
 router = APIRouter()
@@ -53,8 +53,6 @@ def send_ticket(
     png = render_entry_ticket(body.ticketQrPayload, "Evento", body.accessCode, body.quantity)
     deliver_image(body.customerPhone, png, body.ticketMessage)
     _SENT[body.orderId] = png
-    import base64
-
     return {
         "status": "sent",
         "orderId": body.orderId,
@@ -139,7 +137,19 @@ def _process_meta_webhook_sync(payload: Dict[str, Any]) -> None:
                 _SEEN_WAMIDS.popitem(last=False)
         phone = _normalize_mx_phone(msg["from"])
         print(f"[WhatsApp Inbound] from={phone} name={msg['profile_name']!r} text={msg['text']!r}", flush=True)
-        chat_res = handle_ticket_message(phone, msg["text"], msg["profile_name"], core_from_env())
+        chat_res = maybe_handle_ticket(phone, msg["text"], msg["profile_name"], core_from_env())
+        if chat_res is None:
+            _send_meta_payload(phone, {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": phone,
+                "type": "text",
+                "text": {
+                    "preview_url": False,
+                    "body": "Este chat aparta boletos. Escribe boletos para ver las fechas disponibles.",
+                },
+            })
+            continue
         flyer_b64 = (chat_res.tool_output or {}).get("event_flyer_b64")
         if flyer_b64:
             flyer_mime = (chat_res.tool_output or {}).get("event_flyer_mime") or "image/jpeg"
@@ -176,23 +186,19 @@ def _process_meta_webhook_sync(payload: Dict[str, Any]) -> None:
             })
 
 
-app = FastAPI(title="CoDi Tickets WhatsApp Bridge")
-app.include_router(router)
-
-
-@app.get("/webhook")
+@router.get("/webhook")
 def verify_meta_webhook(
     hub_mode: Optional[str] = Query(default=None, alias="hub.mode"),
     hub_verify_token: Optional[str] = Query(default=None, alias="hub.verify_token"),
     hub_challenge: Optional[str] = Query(default=None, alias="hub.challenge"),
 ) -> PlainTextResponse:
-    expected = (os.getenv("WHATSAPP_VERIFY_TOKEN") or os.getenv("VERIFY_TOKEN") or "mi_token").strip()
+    expected = (os.getenv("WHATSAPP_VERIFY_TOKEN") or os.getenv("VERIFY_TOKEN") or "verify-token-123").strip()
     if hub_mode == "subscribe" and hub_verify_token == expected and hub_challenge is not None:
         return PlainTextResponse(content=str(hub_challenge), status_code=200)
     raise HTTPException(status_code=403, detail="Invalid verify token")
 
 
-@app.post("/webhook")
+@router.post("/webhook")
 async def receive_meta_webhook(request: Request, background_tasks: BackgroundTasks) -> Dict[str, Any]:
     payload = await request.json()
     background_tasks.add_task(_process_meta_webhook_sync, payload)
