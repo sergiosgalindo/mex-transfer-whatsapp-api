@@ -45,8 +45,12 @@ _WORD_NUMBERS = {
 }
 _CHECKOUT_RULES = (
     (
-        ("spei", "transferencia", "no tengo codi", "no me funciona codi", "no sirve codi", "no pude con codi", "otra forma de pago"),
-        "¡No te preocupes! Si por alguna razón se te complica pagar con CoDi®, con mucho gusto te apoyamos con una *transferencia bancaria SPEI* directa. Solo escribe *asesor* para pasarte los datos de cuenta y registrar tu pago de inmediato. 😊",
+        ("activar codi", "como uso codi", "cómo uso codi", "tutorial codi", "que es codi", "qué es codi", "como activo codi", "cómo activo codi"),
+        "CoDi® es el sistema oficial y gratuito de Banco de México; viene integrado en tu app bancaria y se activa en solo 1 minuto sin comisiones. Puedes ver el tutorial oficial de Banxico aquí: https://www.banxico.org.mx/sistemas-de-pago/codi-cobro-digital-banco-me.html ✨",
+    ),
+    (
+        ("spei", "transferencia", "no tengo codi", "no me funciona codi", "no sirve codi", "no pude con codi", "otra forma de pago", "no quiero codi"),
+        "¡No te preocupes! Si por alguna razón se te complica o prefieres no usar CoDi®, con mucho gusto te apoyamos con una *transferencia bancaria SPEI* directa. Solo escribe *asesor* para proporcionarte los datos de la cuenta y registrar tu pago de inmediato. 😊",
     ),
     (
         ("pagar", "pago", "vigencia", "expira", "minutos"),
@@ -96,8 +100,9 @@ _TICKET_SYSTEM_PROMPT = (
     "- Método principal (CoDi®):\n"
     "  * El pago principal se realiza mediante CoDi® sin comisiones de boletera. El comprador tiene 10 minutos de vigencia.\n"
     "  * Se puede pagar de 2 formas: 1) Escaneando el código QR CoDi® desde la app de su banco (BBVA, Banorte, Santander, Azteca, etc.), o 2) Abriendo el enlace directo en su celular que conecta con su app bancaria.\n"
-    "- Alternativa de respaldo (Transferencia SPEI si CoDi® no funciona):\n"
-    "  * Si el usuario menciona que su banco no tiene CoDi®, que no sabe cómo usarlo o que tuvo dificultades técnicas con CoDi®, tranquilízalo con empatía: dile que no se preocupe, que sus lugares están protegidos y que con mucho gusto puede realizar una transferencia electrónica SPEI directa escribiendo 'asesor' o solicitándolo en el chat para brindarle los datos de cuenta y confirmar su comprobante.\n"
+    "  * Si el usuario no sabe qué es CoDi® o cómo activarlo en su banca móvil, explícale que es oficial de Banco de México, 100% seguro y gratuito, y compártele el enlace oficial de Banxico con tutoriales paso a paso: https://www.banxico.org.mx/sistemas-de-pago/codi-cobro-digital-banco-me.html\n"
+    "- Alternativa de respaldo (Transferencia SPEI si CoDi® no funciona o el usuario no desea CoDi):\n"
+    "  * Si el usuario no tiene CoDi®, no lo quiere usar o tiene dificultades técnicas, tranquilízalo con empatía: dile que sus lugares están protegidos y que con mucho gusto puede realizar una transferencia bancaria SPEI directa. Si tenemos configurada una CLABE oficial compártela con banco, CLABE, titular y concepto, o indícale que escriba 'asesor' para brindarle los datos bancarios y registrar su comprobante de inmediato.\n"
     "- Entrega de accesos: En cuanto el pago se confirma en segundos, el sistema envía su boleto digital con código QR de acceso único directo a este chat de WhatsApp.\n\n"
     "# REGLAS Y LÍMITES (GUARDRAILS)\n"
     "- Usa EXCLUSIVAMENTE los datos verificados del CONTEXTO RAG DEL EVENTO.\n"
@@ -967,6 +972,18 @@ def _faq(client: CoreApi, session: TicketSession, question: str) -> ChatResponse
 
     for words, answer in _CHECKOUT_RULES:
         if any(word in folded for word in words):
+            if "spei" in words:
+                clabe = os.getenv("ORGANIZER_SPEI_CLABE", "").strip()
+                if clabe:
+                    bank = os.getenv("ORGANIZER_SPEI_BANK", "Banco").strip()
+                    holder = os.getenv("ORGANIZER_SPEI_BENEFICIARY", "CoDi Eventos").strip()
+                    answer = (
+                        f"¡No te preocupes! Si prefieres o se te complica usar CoDi®, con mucho gusto puedes realizar tu pago mediante una *transferencia bancaria SPEI* directa:\n\n"
+                        f"🏦 *Banco:* {bank}\n"
+                        f"💳 *CLABE:* `{clabe}`\n"
+                        f"👤 *Beneficiario:* {holder}\n\n"
+                        f"En cuanto hagas tu transferencia, mándanos tu comprobante por aquí para confirmarte tus boletos al instante. 😊"
+                    )
             llm_rule = _call_ticket_llm(
                 question,
                 session,
