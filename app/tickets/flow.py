@@ -49,7 +49,7 @@ _CHECKOUT_RULES = (
         "CoDi® es el sistema oficial y gratuito de Banco de México; viene integrado en tu app bancaria y se activa en solo 1 minuto sin comisiones. Puedes ver el tutorial oficial de Banxico aquí: https://www.banxico.org.mx/sistemas-de-pago/codi-cobro-digital-banco-me.html ✨",
     ),
     (
-        ("spei", "transferencia", "no tengo codi", "no me funciona codi", "no sirve codi", "no pude con codi", "otra forma de pago", "no quiero codi"),
+        ("spei", "transferencia", "transferir", "clabe", "datos de cuenta", "cuenta bancaria", "no tengo codi", "no me funciona codi", "no sirve codi", "no pude con codi", "otra forma de pago", "no quiero codi", "deposito", "depósito"),
         "¡No te preocupes! Si por alguna razón se te complica o prefieres no usar CoDi®, con mucho gusto te apoyamos con una *transferencia bancaria SPEI* directa. Solo escribe *asesor* para proporcionarte los datos de la cuenta y registrar tu pago de inmediato. 😊",
     ),
     (
@@ -61,6 +61,60 @@ _CHECKOUT_RULES = (
         "Tu código QR de entrada es estilo cine 🎟️: con un solo escaneo en la puerta ingresan todas las entradas incluidas en tu orden.",
     ),
 )
+
+_PEY_BANK_ACCOUNT_CACHE: Optional[Dict[str, str]] = None
+
+
+def get_spei_bank_account_from_pey() -> Optional[Dict[str, str]]:
+    global _PEY_BANK_ACCOUNT_CACHE
+    if _PEY_BANK_ACCOUNT_CACHE is not None:
+        return _PEY_BANK_ACCOUNT_CACHE
+
+    bank_account_id = os.getenv("PEY_BANK_ACCOUNT_ID", "").strip()
+    pey_key = os.getenv("PEY_API_KEY", "").strip()
+    pey_base_url = os.getenv("PEY_BASE_URL", "https://api.pey.mx").rstrip("/")
+
+    if bank_account_id and pey_key:
+        try:
+            resp = httpx.get(
+                f"{pey_base_url}/bank-account/{bank_account_id}",
+                headers={"Authorization": f"Bearer {pey_key}"},
+                timeout=8.0,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("clabe"):
+                    _PEY_BANK_ACCOUNT_CACHE = {
+                        "bank": str(data.get("alias") or "Banco"),
+                        "clabe": str(data.get("clabe")),
+                        "holder": str(data.get("name") or "CoDi Eventos"),
+                    }
+                    print(f"[Pey Bank Account] loaded from Pey API: {_PEY_BANK_ACCOUNT_CACHE['bank']} {data.get('clabe')[:6]}...", flush=True)
+                    return _PEY_BANK_ACCOUNT_CACHE
+        except Exception as exc:
+            print(f"[Pey Bank Account] failed to fetch bank account: {exc}", flush=True)
+
+    clabe = os.getenv("ORGANIZER_SPEI_CLABE", "").strip()
+    if clabe:
+        _PEY_BANK_ACCOUNT_CACHE = {
+            "bank": os.getenv("ORGANIZER_SPEI_BANK", "Banco").strip(),
+            "clabe": clabe,
+            "holder": os.getenv("ORGANIZER_SPEI_BENEFICIARY", "CoDi Eventos").strip(),
+        }
+        return _PEY_BANK_ACCOUNT_CACHE
+
+    return None
+
+
+def _spei_account_info() -> Optional[str]:
+    acc = get_spei_bank_account_from_pey()
+    if acc:
+        return (
+            f"🏦 *Banco:* {acc['bank']}\n"
+            f"💳 *CLABE:* `{acc['clabe']}`\n"
+            f"👤 *Beneficiario:* {acc['holder']}"
+        )
+    return None
 
 
 @dataclass
@@ -402,6 +456,7 @@ def _looks_like_question(lowered: str) -> bool:
         "cumple", "cumpleaños", "cumpleañero", "cumpleañera",
         "vestimenta", "ropa", "zapatos",
         "cover", "dj", "djs", "vigencia", "expira", "puerta", "acceso",
+        "spei", "transferir", "transferencia", "clabe", "deposito", "depósito",
     )
     return any(k in lowered for k in faq_keywords)
 
@@ -973,15 +1028,11 @@ def _faq(client: CoreApi, session: TicketSession, question: str) -> ChatResponse
     for words, answer in _CHECKOUT_RULES:
         if any(word in folded for word in words):
             if "spei" in words:
-                clabe = os.getenv("ORGANIZER_SPEI_CLABE", "").strip()
-                if clabe:
-                    bank = os.getenv("ORGANIZER_SPEI_BANK", "Banco").strip()
-                    holder = os.getenv("ORGANIZER_SPEI_BENEFICIARY", "CoDi Eventos").strip()
+                spei_details = _spei_account_info()
+                if spei_details:
                     answer = (
                         f"¡No te preocupes! Si prefieres o se te complica usar CoDi®, con mucho gusto puedes realizar tu pago mediante una *transferencia bancaria SPEI* directa:\n\n"
-                        f"🏦 *Banco:* {bank}\n"
-                        f"💳 *CLABE:* `{clabe}`\n"
-                        f"👤 *Beneficiario:* {holder}\n\n"
+                        f"{spei_details}\n\n"
                         f"En cuanto hagas tu transferencia, mándanos tu comprobante por aquí para confirmarte tus boletos al instante. 😊"
                     )
             llm_rule = _call_ticket_llm(
